@@ -32,7 +32,9 @@ jobs:
       - run: python tools/build_ui_manifest.py
 
       # includes test_bridge, which checks the UI and the manifests still agree
-      - run: pytest -q
+      # tmp on D:, same as ci.yml. The archive tests' fake white_img files are
+      # full size on NTFS
+      - run: pytest -q --basetemp "$env:RUNNER_TEMP\pytest"
 
       # onedir via the spec: onefile re-extracts to %TEMP% and gets rescanned by
       # Defender on every launch

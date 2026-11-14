@@ -22,6 +22,9 @@ permissions:
 jobs:
   test:
     runs-on: windows-latest
+    # a full run is about 20 minutes. Anything waiting on a dialog nobody can
+    # click would otherwise burn the default six hours
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
