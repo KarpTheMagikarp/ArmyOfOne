@@ -1372,8 +1372,9 @@ def test_every_id_reporting_nothing_is_not_a_quiet_success(mod):
 
 # XIII-2's tools, standing in for the real ones the way they were traced: each
 # writes its own id's models\mod folder and nothing else. Every start and end
-# goes on a line of its own in timeline.txt, appended, so runs side by side
-# can't tear each other's lines
+# gets a file of its own under timeline/. One shared file appended to used to
+# be enough, but Windows fakes O_APPEND as seek then write, so six tools at
+# once wrote over each other's lines and an end went missing
 SIDE_TOOL = r"""
 import pathlib, sys, time
 def here(text):
@@ -1381,9 +1382,9 @@ def here(text):
 member = sys.argv[2].split('.')[0] if sys.argv[1] == '/s' else here(sys.argv[2]).stem
 out = here(sys.argv[4]) if sys.argv[1] == '/s' else None
 kind = 'textures' if out is not None else 'models'
-log = pathlib.Path('timeline.txt')
-with log.open('a') as handle:
-    handle.write(f'start {member} {kind} {time.monotonic()}\n')
+marks = pathlib.Path('timeline')
+marks.mkdir(exist_ok=True)
+(marks / f'{member}.{kind}.start').write_text(str(time.monotonic()))
 print(f'{kind} for {member}: one', flush=True)
 time.sleep(float(pathlib.Path('pause.txt').read_text(encoding="utf-8")) if pathlib.Path('pause.txt').exists() else 0.3)
 print(f'{kind} for {member}: two', flush=True)
@@ -1397,8 +1398,7 @@ if code > 0 or kind == 'models':
     for half in ('trb', 'imgb'):
         (out / f'{member}.win32.{half}').write_bytes(f'HD {kind} {member}'.encode())
 print(f'{kind} for {member}: three', flush=True)
-with log.open('a') as handle:
-    handle.write(f'end {member} {kind} {time.monotonic()}\n')
+(marks / f'{member}.{kind}.end').write_text(str(time.monotonic()))
 sys.exit(code)
 """
 
@@ -1428,9 +1428,9 @@ def side(mod, monkeypatch):
 
 def timeline(root):
     spans = {}
-    for row in (root / "timeline.txt").read_text(encoding="utf-8").splitlines():
-        what, member, kind, at = row.split()
-        spans.setdefault((member, kind), {})[what] = float(at)
+    for mark in (root / "timeline").glob("*.*.*"):
+        member, kind, what = mark.name.split(".")
+        spans.setdefault((member, kind), {})[what] = float(mark.read_text())
     return spans
 
 

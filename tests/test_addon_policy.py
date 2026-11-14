@@ -7,6 +7,7 @@ platform-free header, so they can be built with whatever compiler is here and
 checked on every run rather than only when someone opens Visual Studio.
 """
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -21,7 +22,8 @@ def policy_test(tmp_path_factory):
     compiler = shutil.which("g++") or shutil.which("clang++")
     if compiler is None:
         pytest.skip("no host C++ compiler")
-    binary = tmp_path_factory.mktemp("addon") / "policy_test"
+    # mingw's g++ tacks .exe on whether you asked for it or not
+    binary = tmp_path_factory.mktemp("addon") / ("policy_test" + (".exe" if os.name == "nt" else ""))
     build = subprocess.run(
         [compiler, "-std=c++20", "-Wall", "-Wextra", "-Werror",
          "-o", str(binary), str(SOURCE / "redirect_policy_test.cpp")],

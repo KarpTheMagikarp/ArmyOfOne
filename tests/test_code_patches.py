@@ -135,7 +135,9 @@ int main(int, char** argv) {
     for n, raw in enumerate(CORPUS):
         path = tmp_path / f"{n}.nccp"
         path.write_bytes(raw)
-        theirs = subprocess.run([str(binary), str(path)], capture_output=True).stdout.decode()
+        # printf goes through the CRT's text mode on Windows, so \n comes out \r\n
+        out = subprocess.run([str(binary), str(path)], capture_output=True).stdout
+        theirs = out.decode().replace("\r\n", "\n")
         patches, skipped = nccp.parse(raw)
         ours = "".join(f"{p.rva:x}:{p.data.hex()}\n" for p in patches) + \
             "".join(f"skip:{k}\n" for k in skipped)
