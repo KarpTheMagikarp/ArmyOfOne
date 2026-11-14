@@ -1,0 +1,88 @@
+name: Build Release
+
+# builds the Windows exe on a Windows runner (PyInstaller can't cross-compile)
+# when a v* tag is pushed. The tag is the release version patcher/updater.py
+# reads.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:      # so a build can be smoke tested without cutting a tag
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # pytest isn't a runtime dep, so it's installed here for the test step
+      - run: pip install pyinstaller pytest
+      - run: pip install -r requirements.txt
+
+      # the UI's manifest is generated, not committed
+      - run: python tools/build_ui_manifest.py
+
+      # includes test_bridge, which checks the UI and the manifests still agree
+      - run: pytest -q
+
+      # onedir via the spec: onefile re-extracts to %TEMP% and gets rescanned by
+      # Defender on every launch
+      - run: pyinstaller --noconfirm --clean ArmyOfOne.spec
+
+      # a missing hook or bad exclude usually shows up as a missing payload
+      - name: Check bundle
+        shell: pwsh
+        run: |
+          $dir = "dist/ArmyOfOne"
+          if (-not (Test-Path "$dir/ArmyOfOne.exe")) { throw "no exe" }
+          foreach ($p in @("ui/index.html", "assets/manifest.json", "manifests")) {
+            if (-not (Test-Path "$dir/_internal/$p")) { throw "missing payload: $p" }
+          }
+          # pywebview loads its backend by name, so a missing one builds clean
+          # and only fails when it opens a window
+          if (-not (Get-ChildItem "$dir/_internal" -Recurse -Filter "edgechromium*" | Select-Object -First 1)) {
+            throw "webview edgechromium backend not bundled"
+          }
+          # a manifest naming a file the bundle doesn't have is only a per-patch
+          # failure at runtime, so fail the build on it instead
+          python tools/check_bundle.py "$dir/_internal"
+          if ($LASTEXITCODE -ne 0) { throw "a default-enabled patch has no file to install" }
+          $mb = [math]::Round((Get-ChildItem $dir -Recurse | Measure-Object Length -Sum).Sum / 1MB, 1)
+          Write-Host "bundle size: $mb MB"
+          Get-ChildItem "$dir/_internal/assets" | Sort-Object Length -Descending |
+            Select-Object -First 10 Name, @{n='MB';e={[math]::Round($_.Length/1MB,2)}} | Format-Table
+
+      # onedir is a folder, so it ships zipped
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/ArmyOfOne/* -DestinationPath ArmyOfOne-windows.zip
+
+      # pinned to a commit: a third-party action with write access to releases
+      # shouldn't move under us when its v2 tag does
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          files: |
+            ArmyOfOne-windows.zip
+            manifests/*.json
+          generate_release_notes: true
+          body: |
+            Extract the zip anywhere and run `ArmyOfOne.exe`. Extract it first:
+            run from inside the zip, the exe can't find the rest of itself.
+
+            64-bit Windows 10 (1803 or later) or Windows 11.
+
+            Needs the Microsoft Edge WebView2 runtime. Windows 11 and most
+            Windows 10 machines already have it; if not, the app says so and
+            links the free installer. No admin rights needed either way.
+
+            Windows SmartScreen will warn about it because the build is
+            unsigned: More info > Run anyway.

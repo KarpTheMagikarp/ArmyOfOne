@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# so `from patcher...` and `from tests.helpers...` work without installing anything
+pythonpath = ["."]
+testpaths = ["tests"]

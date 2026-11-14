@@ -1,0 +1,14 @@
+42
+32
+zone
+0
+0
+0
+1
+zoneu\z010\bg\loc014\m022\bin\block022.win32
+zoneu\z010\bg\loc014\m022\bin\block022.win32.trb
+zoneu\z010\bg\loc014\m022\bin\block022.win32.imgb
+-1
+:~,1,0,0,0.0,0.0,z10_022_Tomato.txt,data\FFXIII_General_Models.bin
+:X
+:X

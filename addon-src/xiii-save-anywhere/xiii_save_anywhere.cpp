@@ -1,0 +1,1748 @@
+// Save Anywhere for FFXIII, as a NovaFix add-on. Pause out in the field and
+// press Y (or whatever key XIII puts it on) to save through the game's own
+// save screen, and loading that save puts you back where you were standing
+// instead of at the station.
+//
+// None of this is new game logic, it's the game's own moves in a new order.
+// XIII runs on one zone state machine (ZoneStateMachine.cpp), and a station
+// saves by firing TRG_SAVE_REQ, which the machine only takes from FIELD_IDLE:
+// free roam, never an event, a battle or a cutscene. Pausing out in the field
+// is its own state too (FIELD_PAUSE), apart from the event and battle pauses.
+// So from that pause we press Resume for you, then fire SAVE_REQ the moment
+// the machine is back in FIELD_IDLE, and the save screen runs exactly the way
+// it does at a station.
+//
+// A load drops you at a save point: an id the game sets whenever you walk into
+// a station's area, looked up in the zone's r_savepoint records. We only offer
+// the save while that lookup works, so the save always points into the area
+// you're in, and a load can never start you somewhere you haven't reached.
+// Where you actually stood (the live world matrix, so facing too) goes in a
+// .where file in this folder, one per slot. When that save is loaded, if it
+// still matches, the field's start marker answers with that matrix instead of
+// the station's, so the game's own spawn lands you there. Anything off and you
+// start at the station, same as vanilla.
+//
+// The prompt goes on the pause screen itself, beside Quit, in the game's own
+// font and button glyph, so it follows whatever you're playing on. (A NovaFix
+// notification can't do it: the pause freezes the layer those draw on, so one
+// only shows once you've unpaused, out where Y opens the main menu.) Only the
+// Steam ffxiiiimg.exe is supported. Anything else gets a line in the log and
+// the add-on stays out of the way.
+
+#include <windows.h>
+
+#include <MinHook.h>
+#include <novafix/plugin_api.h>
+
+#include <atomic>
+#include <algorithm>
+#include <cmath>
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cwctype>
+#include <string>
+
+namespace {
+
+std::wstring g_dir;
+std::uintptr_t g_base = 0;
+bool g_debug = false;
+
+void Write(const char* format, va_list args) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, (g_dir + L"\\xiii-save-anywhere.log").c_str(), L"a") != 0 || !file) return;
+    vfprintf(file, format, args);
+    fputc('\n', file);
+    fclose(file);
+}
+
+void Log(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    Write(format, args);
+    va_end(args);
+}
+
+// the pause bar, button and spawn traces that pinned this down. Worth having
+// when a report comes in, noise in everyone else's log, so Debug=1 only
+void Trace(const char* format, ...) {
+    if (!g_debug) return;
+    va_list args;
+    va_start(args, format);
+    Write(format, args);
+    va_end(args);
+}
+
+// the add-on's own folder, plus one of its subfolders, made on first use. A
+// player with a hundred slots shouldn't find a hundred files next to the ini
+std::string Folder(const char* sub) {
+    const std::wstring wide = g_dir + L"\\" + std::wstring(sub, sub + std::strlen(sub));
+    CreateDirectoryW(wide.c_str(), nullptr);
+    return std::string(g_dir.begin(), g_dir.end()) + "\\" + sub;
+}
+
+// RVAs in the Steam build (ffxiiiimg.exe, sha256 a633de01..., 2014). XIII has
+// no relocations so it always sits at 0x400000, but it's base + RVA anyway,
+// and the globals are read out of the instructions that use them
+// The per-frame hook is the pad update, not InputManager::Update (0x41FBE0)
+// that calls it: NovaFix detours that one for its dynamic prompts and checks
+// its prologue first, so our jump there switched them off
+constexpr DWORD kPadUpdateRva = 0x4206C0;       // Pad::Update, thiscall(arg), once a frame per pad
+constexpr unsigned char kPadUpdateHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x81, 0xEC, 0x90, 0x01, 0x00, 0x00};
+constexpr DWORD kGetStateRva = 0x417850;        // ZoneStateMachine::GetState, thiscall
+constexpr unsigned char kGetStateHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08, 0x89, 0x4D, 0xF8, 0x6A, 0x00};
+constexpr DWORD kZoneFireRva = 0x40D070;        // Zone::FireTrigger, thiscall(trigger)
+constexpr unsigned char kZoneFireHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08, 0x89, 0x4D, 0xF8, 0x8B, 0x45, 0xF8};
+constexpr DWORD kGetSavePointRva = 0x728EE0;    // cdecl(out 16 bytes)
+constexpr unsigned char kGetSavePointHead[] = {0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x08, 0x50, 0xE8};
+constexpr DWORD kFindSavePointRowRva = 0x43D9C0;  // cdecl(), the r_savepoint row a load spawns from, or null
+constexpr unsigned char kFindSavePointRowHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x5C, 0xA1};
+// where a chara stands. Chara::getPos is no use from here: it only queues
+// script command 0xB8 to fill a script variable later. Under the actor
+// registry's lock (+0x6C0) the handle resolves to the actor, whose live world
+// matrix is at +0x78 (translation row at +0xA8). +0x150 is only a request
+// block setters like setPosFlash drop values into for 0x7bfca0 to apply
+constexpr DWORD kActorRegistryRva = 0x22E80DC;  // the registry pointer
+constexpr DWORD kResolveActorRva = 0x2A18B0;    // thiscall(registry, handle), the same one NovaFix uses
+constexpr unsigned char kResolveActorHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x89, 0x4D, 0xF0, 0x33, 0xC0, 0x83};
+constexpr DWORD kLockRva = 0x09D1A0, kUnlockRva = 0x09D220;  // thiscall(tag), thiscall()
+constexpr unsigned char kLockHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0x89, 0x4D, 0xEC, 0x83, 0x7D, 0x08};
+constexpr unsigned char kUnlockHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0x83, 0x78};
+constexpr DWORD kActorMatrix = 0x78, kActorTranslation = 0xA8;
+constexpr DWORD kSetPosFlashRva = 0x2C3450;     // cdecl(handle, const float pos[4], 0)
+constexpr unsigned char kSetPosFlashHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0x0F, 0xBF, 0x45, 0x08};
+constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
+constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
+constexpr DWORD kZoneLoadRva = 0x7EB3A4;        // mov ecx, [zone] in Zone's trigger native
+constexpr unsigned char kMovEcxMem[] = {0x8B, 0x0D};
+// the pause widget's mode setter, thiscall(mode): builds the bottom right
+// labels from text ids, $pause_01 (Quit) on the left. NovaFix never touches it
+constexpr DWORD kPauseModeRva = 0x546630;
+constexpr unsigned char kPauseModeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x38, 0x89, 0x4D, 0xE0, 0x8B, 0x45, 0xE0};
+// the save slot's writer and reader, thiscall. Both go to Steam Cloud when
+// it's on (the [0x28339c8] storage object) and to a file when it isn't, so
+// these see every save and every load whichever way it went. CreateFileA
+// never sees a cloud save at all
+constexpr DWORD kSaveWriteRva = 0x439810;       // (?, ?, const void* data, int size), ret 0x10
+constexpr unsigned char kSaveWriteHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x68, 0x0C, 0x00, 0x00, 0xA1, 0x84, 0x5A};
+// where a field starts you: the start marker a station's row names, turned
+// into up to three world matrices (leader and party) by the marker lookup,
+// thiscall(marker, out0, out1, out2), count back. The spawn asks it, then the
+// camera and the party placement each ask it again for the same marker, so
+// it's the lookup that has to answer with the save's spot, not one caller
+constexpr DWORD kMarkerLookupRva = 0x304A80;
+// a station's area, walked into: thiscall(a, save point id), ret 8. It's what
+// makes that station the current save point ("onEnter savepoint area"), so
+// it's the moment the game itself would let you save
+constexpr DWORD kAreaEnterRva = 0x1BD1C0;
+constexpr unsigned char kAreaEnterHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20, 0xA1, 0x84, 0x5A, 0x6E, 0x02, 0x33};
+constexpr unsigned char kMarkerLookupHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x44, 0x56, 0x89, 0x4D, 0xC0, 0xA1, 0x70};
+// the start marker itself: [[0x27ff068]+0x40] + 0x2CC, read under its lock
+constexpr DWORD kFieldStartRva = 0x23FF068;
+constexpr DWORD kStartMarkerRva = 0x1D30D0;
+constexpr unsigned char kStartMarkerHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08, 0x89, 0x4D, 0xF8, 0x6A, 0x00, 0x8B};
+constexpr DWORD kSaveReadRva = 0x439F30;        // (?, void* out, int size), ret 0xC
+constexpr unsigned char kSaveReadHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x3C, 0x02, 0x00, 0x00, 0x89, 0x8D, 0xC4};
+// TextString::SetId(id, arg), thiscall: looks a text id like "$pause_03" up
+// and holds the result. The labels get their text through it, inside the
+// mode setter, and its ctor and dtor bracket a lookup of our own. NovaFix
+// guards the label calls after it (0x63B920, 0x680090), never these
+constexpr DWORD kTextSetIdRva = 0x4FC870;
+constexpr unsigned char kTextSetIdHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x44, 0x89, 0x4D, 0xBC, 0x8B, 0x45, 0xBC};
+constexpr DWORD kTextCtorRva = 0x4FC7E0, kTextDtorRva = 0x4FC820;
+// the story so far, on the party database [0x282b230]: Party.getStoryNumber's
+// engine side, cdecl, reads +0x2590 under the database's lock (+0x27210). The
+// event flags are 0x2000 bits at +0x1520 under the same lock
+constexpr DWORD kStoryRva = 0x76C750;
+constexpr unsigned char kStoryHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0x6A, 0x00, 0x8B, 0x0D, 0x30, 0xB2,
+                                        0x82, 0x02, 0x81, 0xC1, 0x10, 0x72, 0x02, 0x00, 0xE8, 0x37, 0x0A, 0x93,
+                                        0xFF, 0xA1, 0x30, 0xB2, 0x82, 0x02, 0x8B, 0x88, 0x90, 0x25, 0x00, 0x00};
+constexpr DWORD kEventFlagRva = 0x768196;       // inside Party.getEventFlag's lookup
+constexpr unsigned char kEventFlagHead[] = {0x8B, 0x0D, 0x30, 0xB2, 0x82, 0x02, 0x23, 0x94, 0x81, 0x20, 0x15, 0x00, 0x00};
+constexpr DWORD kPartyLock = 0x27210, kEventFlags = 0x1520, kEventFlagBytes = 0x400;
+// the scripts' own variables (Party.setWork), 0x200 dwords right before the
+// event flags at +0xD20, so the two are read as one block
+constexpr DWORD kWorkRva = 0x76807E;            // inside Party.setWork's store
+constexpr unsigned char kWorkHead[] = {0x8B, 0x0D, 0x30, 0xB2, 0x82, 0x02, 0x8B, 0x55,
+                                       0x0C, 0x89, 0x94, 0x81, 0x20, 0x0D, 0x00, 0x00};
+constexpr DWORD kWork = 0xD20, kWorkBytes = 0x800;
+// the zone's own flags (Zone.setFlag), [[zone]+0x10]+0xD8. They live only as
+// long as the zone, so a save never keeps them: one that's moved since the
+// state was sanctioned is exactly the sort of thing a reload would lose
+constexpr DWORD kZoneFlagRva = 0x7EB290;        // Zone.checkFlag's read
+constexpr unsigned char kZoneFlagHead[] = {0x8B, 0x0D, 0x90, 0x11, 0x81, 0x02, 0x89, 0x4D, 0xF0, 0x8B, 0x55, 0xF0,
+                                           0x8B, 0x42, 0x10, 0x89, 0x45, 0xEC, 0x8B, 0x55, 0xFC, 0xC1, 0xEA, 0x05,
+                                           0x8B, 0x4D, 0xFC, 0x83, 0xE1, 0x1F, 0xB8, 0x01, 0x00, 0x00, 0x00, 0xD3,
+                                           0xE0, 0x8B, 0x4D, 0xEC, 0x23, 0x84, 0x91, 0xD8, 0x00, 0x00, 0x00};
+// how many words of them get compared: the game never bounds the ids, and
+// more words than the zone uses only makes the guard stricter, never looser
+constexpr DWORD kZoneFlagWords = 8;
+// two things a scripted sequence switches: the field's UI-off bits
+// ([[0x27ff068]+0x1C], Field.enableFieldUserInterface) and the menu mask bits
+// ([[0x282b1f4]+0x184], White.setMenuMaskFlag)
+constexpr DWORD kFieldUiRva = 0x7D1AC9;
+constexpr unsigned char kFieldUiHead[] = {0x8B, 0x45, 0xEC, 0x8B, 0x48, 0x1C, 0x0B, 0x4D, 0xFC, 0x8B, 0x55, 0xEC};
+constexpr DWORD kMenuMaskRva = 0x75D8CD, kMenuMaskBitsRva = 0x75D901;
+constexpr unsigned char kMenuMaskHead[] = {0xA1, 0xF4, 0xB1, 0x82, 0x02};
+constexpr unsigned char kMenuMaskBitsHead[] = {0x23, 0x84, 0x91, 0x84, 0x01, 0x00, 0x00};
+// the spawn sets the leader down this far behind the start marker, along its
+// third row (measured the same in every zone tried), so ours answers that
+// much ahead of the spot and the leader lands on it
+constexpr float kSpawnStep = 4.0f;
+constexpr unsigned char kTextCtorHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0xC7, 0x00};
+constexpr unsigned char kTextDtorHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0xC7, 0x00};
+
+// the zone state machine's enum. Triggers are the table's 0-59, states its
+// 60-137, held internally as the table index minus 60
+constexpr int kTrgSaveReq = 41;
+constexpr int kStateFieldIdle = 3, kStateFieldPause = 23, kStateFieldPauseWait = 27, kStateSave = 60;
+
+// every state with EVENT in its name (the table at 0x26A1728): cutscenes,
+// scenes you walk through, cutscenes inside a battle, and their pauses and
+// skips. A plain fight (5-8, 24) isn't one
+bool InScene(int state) {
+    return (state >= 13 && state <= 18) || state == 21 || state == 22 || state == 25 || state == 26 ||
+           state == 29 || state == 30 || (state >= 33 && state <= 37) || (state >= 42 && state <= 45) ||
+           state == 47 || state == 49 || (state >= 51 && state <= 59) || (state >= 64 && state <= 73);
+}
+
+// a pad after its update is 16-bit button masks: held, last frame's held,
+// pressed (held & ~last), released, then the two pressed-or-repeating masks
+// the menus read. Keyboard and mouse are folded into the same bits before
+// this, through XIII's key bindings, so one bit covers every device. Bit 4 is
+// Y on an Xbox pad (A 5, X 6, B 7, Back 14, Start 15) and Triangle on a PS3 one
+constexpr DWORD kPadHeld = 0x24, kPadPressed = 0x2C, kPadRepeat = 0x34, kPadRepeatToo = 0x38;
+
+using PadUpdateFn = void(__fastcall*)(void*, void*, void*);
+using GetStateFn = int(__fastcall*)(void*, void*);
+using ZoneFireFn = void(__fastcall*)(void*, void*, int);
+using GetSavePointFn = void(__cdecl*)(void*);
+using FindSavePointRowFn = void*(__cdecl*)();
+using ResolveActorFn = unsigned char*(__fastcall*)(void*, void*, int);
+using LockFn = void(__fastcall*)(void*, void*, void*);
+using UnlockFn = void(__fastcall*)(void*, void*);
+using SetPosFlashFn = void(__cdecl*)(DWORD, const float*, int);
+using PlayerHandleFn = DWORD*(__cdecl*)(DWORD*);
+using SaveWriteFn = int(__fastcall*)(unsigned char*, void*, int, int, const void*, int);
+using SaveReadFn = int(__fastcall*)(unsigned char*, void*, int, void*, int);
+using MarkerLookupFn = int(__fastcall*)(void*, void*, int, float*, float*, float*);
+using AreaEnterFn = void(__fastcall*)(void*, void*, void*, void*);
+using StartMarkerFn = int(__fastcall*)(void*, void*);
+using TextThisFn = void(__fastcall*)(void*, void*);
+using PauseModeFn = void(__fastcall*)(unsigned char*, void*, int);
+using TextSetIdFn = void(__fastcall*)(unsigned char*, void*, const char*, int);
+using StoryFn = int(__cdecl*)();
+
+PadUpdateFn g_padUpdate = nullptr;
+SaveWriteFn g_saveWrite = nullptr;
+SaveReadFn g_saveRead = nullptr;
+MarkerLookupFn g_markerLookup = nullptr;
+AreaEnterFn g_areaEnter = nullptr;
+StartMarkerFn g_startMarker = nullptr;
+void** g_fieldStart = nullptr;
+TextThisFn g_textCtor = nullptr, g_textDtor = nullptr;
+GetStateFn g_getState = nullptr;
+ZoneFireFn g_zoneFire = nullptr;
+GetSavePointFn g_getSavePoint = nullptr;
+FindSavePointRowFn g_findSavePointRow = nullptr;
+ResolveActorFn g_resolveActor = nullptr;
+LockFn g_lock = nullptr;
+UnlockFn g_unlock = nullptr;
+unsigned char** g_actorRegistry = nullptr;
+SetPosFlashFn g_setPosFlash = nullptr;
+PlayerHandleFn g_playerHandle = nullptr;
+PauseModeFn g_pauseMode = nullptr;
+TextSetIdFn g_textSetId = nullptr;
+void** g_zoneSlot = nullptr;
+StoryFn g_story = nullptr;
+unsigned char** g_party = nullptr;
+unsigned char** g_menu = nullptr;
+
+std::atomic<bool> g_enabled{true};
+int g_button = 4;
+bool g_prompt = true;
+
+struct SavePoint {
+    unsigned char bytes[16];
+    bool operator==(const SavePoint& o) const { return std::memcmp(bytes, o.bytes, 16) == 0; }
+};
+
+// alignas: the engine reads these as vec4s
+struct alignas(16) Vec4 {
+    float v[4];
+};
+
+// a world matrix as the engine keeps one: rows, translation in the last
+struct alignas(16) Matrix {
+    float m[16];
+};
+
+// what the per-frame side keeps between frames. Only the game thread touches
+// it, except what the save writer and reader hand over, which may run on
+// the game's save thread
+enum class Phase { Idle, Resuming, Requested, Saving, Settling };
+Phase g_phase = Phase::Idle;
+// wall clock, not frames: a frame budget is a second at 180 fps and four at 45
+ULONGLONG g_phaseStart = 0;
+Matrix g_savedMatrix{};
+Vec4 g_savedTrail[6]{};
+int g_savedTrailCount = 0;
+SavePoint g_savedPoint{};
+int g_lastState = -1;
+void* g_leadPad = nullptr;
+bool g_pressed = false;
+int g_swallow = 0;
+int g_learnLines = 0;
+bool g_decorated = false;
+bool g_relabel = false;
+int g_relabelled = 0;
+bool g_pressStart = false;
+bool g_heldLastFrame = false;
+bool g_eatUntilUp = false;
+int g_pauseLogLines = 0;
+char g_saveLabel[32]{};
+char g_barLabel[256]{};
+
+struct SlotHash {
+    int slot = -1;
+    unsigned long long hash = 0;
+    ULONGLONG at = 0;
+};
+
+CRITICAL_SECTION g_fileLock;
+SlotHash g_written;             // the slot our save wrote, and what it wrote
+SlotHash g_loaded;              // the slot last read outside the field: the one being loaded
+std::atomic<int> g_stateForFiles{-1};
+std::atomic<bool> g_ourSave{false};
+// a slot whose spot a station save just made stale, for the log on the game thread
+std::atomic<int> g_staleSlot{-1};
+
+// the load side: wait for the field to settle, warp, then watch the landing
+// a load of ours on its way into the field: the save's matrix, the marker it
+// answers for, and until when. Then a look at where it actually landed
+struct Spawn {
+    bool armed = false;
+    int marker = -1;
+    ULONGLONG until = 0;
+    Matrix matrix{};
+    int slot = -1;
+    int answered = 0;
+};
+Spawn g_spawn;
+ULONGLONG g_landCheckAt = 0, g_landGiveUp = 0, g_landSeenAt = 0, g_rescueAt = 0;
+Vec4 g_landTarget{}, g_stationPos{};
+int g_rescues = 0;
+// where to go if the floor's gone: the save's trail, newest first, then the
+// station. -1 is the spot itself
+Vec4 g_fallback[6]{};
+int g_fallbackCount = 0, g_fallbackAt = -1;
+
+void* Zone() { return *g_zoneSlot; }
+
+void* StateMachine() {
+    auto* zone = static_cast<unsigned char*>(Zone());
+    return zone ? *reinterpret_cast<void**>(zone + 0x14) : nullptr;
+}
+
+int State() {
+    void* sm = StateMachine();
+    return sm ? g_getState(sm, nullptr) : -1;
+}
+
+DWORD PlayerHandle() {
+    DWORD handle = 0xFFFFFFFF;
+    g_playerHandle(&handle);
+    return handle;
+}
+
+// the actor's live matrix, copied out under the registry's lock
+bool ReadMatrix(DWORD handle, Matrix& out) {
+    if (handle == 0xFFFFFFFF) return false;
+    out = {};
+    unsigned char* registry = *g_actorRegistry;
+    if (!registry) return false;
+    g_lock(registry + 0x6C0, nullptr, nullptr);
+    unsigned char* actor = g_resolveActor(registry, nullptr, static_cast<int>(handle));
+    if (actor) std::memcpy(out.m, actor + kActorMatrix, sizeof out.m);
+    g_unlock(registry + 0x6C0, nullptr);
+    if (!actor) return false;
+    for (float f : out.m)
+        if (!std::isfinite(f)) return false;
+    return true;
+}
+
+size_t Readable(const unsigned char* at, unsigned char* out, size_t want) {
+    size_t got = 0;
+    while (got < want) {
+        MEMORY_BASIC_INFORMATION info{};
+        if (!VirtualQuery(at + got, &info, sizeof info) || info.State != MEM_COMMIT ||
+            (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+            !(info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)))
+            break;
+        const size_t room = static_cast<const unsigned char*>(info.BaseAddress) + info.RegionSize - (at + got);
+        const size_t take = std::min(room, want - got);
+        std::memcpy(out + got, at + got, take);
+        got += take;
+    }
+    return got;
+}
+
+// what the game itself knows about her footing, in the object at actor+0x10:
+// bit 22 of +0x380 is on while she stands on the level's own floor and off on
+// lifts, platforms and in the air, and +0x398 is the last spot of that floor
+// she stood on, frozen the moment she steps onto anything else. Read off two
+// labelled test runs (floor, a lift at the top, hop platforms, mid-jump),
+// where it matched every pause. The code that writes them is reached through
+// a table, so nothing here is byte-checked: anything unreadable or odd reads
+// as not on solid ground, and Save just stays off
+constexpr DWORD kActorFooting = 0x10, kFootingFlags = 0x380, kFootingGround = 0x398;
+constexpr DWORD kOnLevelFloor = 1u << 22;
+
+struct Footing {
+    bool solid = false;
+    Vec4 ground{};
+};
+
+bool ReadFooting(DWORD handle, Footing& out) {
+    out = {};
+    if (handle == 0xFFFFFFFF) return false;
+    unsigned char* registry = *g_actorRegistry;
+    if (!registry) return false;
+    unsigned char block[0x28]{};
+    size_t got = 0;
+    g_lock(registry + 0x6C0, nullptr, nullptr);
+    unsigned char* actor = g_resolveActor(registry, nullptr, static_cast<int>(handle));
+    unsigned char* holder = nullptr;
+    if (actor && Readable(actor + kActorFooting, reinterpret_cast<unsigned char*>(&holder), sizeof holder) == sizeof holder &&
+        holder)
+        got = Readable(holder + kFootingFlags, block, sizeof block);
+    g_unlock(registry + 0x6C0, nullptr);
+    if (got < sizeof block) return false;
+    DWORD flags = 0;
+    std::memcpy(&flags, block, sizeof flags);
+    std::memcpy(out.ground.v, block + (kFootingGround - kFootingFlags), 3 * sizeof(float));
+    out.ground.v[3] = 1.0f;
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(out.ground.v[i])) return false;
+    out.solid = (flags & kOnLevelFloor) != 0;
+    return true;
+}
+
+bool Position(DWORD handle, Vec4& out) {
+    Matrix matrix{};
+    if (!ReadMatrix(handle, matrix)) return false;
+    std::memcpy(out.v, matrix.m + 12, sizeof out.v);
+    return true;
+}
+
+Vec4 Translation(const float* matrix) {
+    Vec4 out{};
+    std::memcpy(out.v, matrix + 12, sizeof out.v);
+    return out;
+}
+
+float Distance(const Vec4& a, const Vec4& b) {
+    const float dx = a.v[0] - b.v[0], dy = a.v[1] - b.v[1], dz = a.v[2] - b.v[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// what a save carries that the game's scripts rebuild a field from. A station
+// only ever saves a state the designers put a station in, so that's the one
+// Save Anywhere may save too. What moves the story on is a scene: the chapter
+// 9 softlock was a fight, a cutscene, then a save on the lift before the next
+// station. So it's no scene since the last station, and the story number and
+// the UI and menu locks as they were there. The event flags, script variables
+// and zone flags are kept for the log only: a chest or a jump up a ledge
+// flips event flags too, and holding Save back for those made it a station
+// mod with extra steps
+struct Progress {
+    int story = -1;
+    DWORD ui = 0;
+    DWORD menu[8]{};
+    DWORD zone[kZoneFlagWords]{};
+    unsigned char work[kWorkBytes]{};
+    unsigned char flags[kEventFlagBytes]{};
+};
+
+Progress g_sanctioned;
+// the first scene state seen since the last station, or -1
+int g_sceneSince = -1;
+// what makes a state one a station could save, so Save Anywhere may too:
+// standing at a station in free roam (walked into its area, or the field
+// started you there), a station save, or loading a save of ours that was made
+// under this same guard. Not a slot read on its own: the load screen reads
+// every slot, and the saves' bytes don't carry the station in the clear
+enum SanctionKind { kNone, kLoad, kStation, kOurs };
+std::atomic<int> g_sanction{kNone};
+std::atomic<bool> g_areaEntered{false};
+std::atomic<bool> g_startWanted{false};
+Vec4 g_startPos{};
+ULONGLONG g_idleSince = 0;
+
+void ReadProgress(Progress& out) {
+    out.story = g_story();
+    unsigned char* party = *g_party;
+    if (party) {
+        g_lock(party + kPartyLock, nullptr, nullptr);
+        std::memcpy(out.work, party + kWork, sizeof out.work);
+        std::memcpy(out.flags, party + kEventFlags, sizeof out.flags);
+        g_unlock(party + kPartyLock, nullptr);
+    }
+    auto* field = static_cast<unsigned char*>(*g_fieldStart);
+    out.ui = field ? *reinterpret_cast<DWORD*>(field + 0x1C) : 0;
+    if (unsigned char* menu = *g_menu) std::memcpy(out.menu, menu + 0x184, sizeof out.menu);
+    auto* zone = static_cast<unsigned char*>(Zone());
+    auto* holder = zone ? *reinterpret_cast<unsigned char**>(zone + 0x10) : nullptr;
+    if (holder) std::memcpy(out.zone, holder + 0xD8, sizeof out.zone);
+    else std::memset(out.zone, 0xFF, sizeof out.zone);
+}
+
+// the first way a state differs from the sanctioned one, or null
+const char* Moved(const Progress& now) {
+    if (now.story != g_sanctioned.story) return "the story moved on";
+    if (now.ui != g_sanctioned.ui) return "a sequence has the field UI off";
+    if (std::memcmp(now.menu, g_sanctioned.menu, sizeof now.menu) != 0) return "a sequence has the menus locked";
+    return nullptr;
+}
+
+// how a state differs from the sanctioned one, for the log: the event flags
+// that moved (the first few by number) and the two sequence switches
+void LogProgress(const char* when, const Progress& now) {
+    char moved[96]{};
+    int count = 0, at = 0;
+    for (DWORD i = 0; i < kEventFlagBytes * 8; ++i) {
+        if (((now.flags[i / 8] ^ g_sanctioned.flags[i / 8]) >> (i % 8) & 1) == 0) continue;
+        if (++count <= 6) at += std::snprintf(moved + at, sizeof moved - at, " %lu", i);
+    }
+    int work = 0;
+    for (DWORD i = 0; i < kWorkBytes / 4; ++i)
+        work += std::memcmp(now.work + i * 4, g_sanctioned.work + i * 4, 4) != 0;
+    Log("%s: story %d (last load or station %d), %d event flags moved%s, %d script variables, zone %08lx %08lx "
+        "(was %08lx %08lx), ui %#lx, menu %08lx %08lx", when, now.story, g_sanctioned.story, count, moved, work,
+        now.zone[0], now.zone[1], g_sanctioned.zone[0], g_sanctioned.zone[1], now.ui, now.menu[0], now.menu[1]);
+}
+
+// the leader's track over the last moment in free roam, sampled every 40 ms
+struct Sample {
+    ULONGLONG at;
+    Vec4 pos;
+    float axis[2][2];  // rows 0 and 2 of her matrix, flattened: one of them is where she faces
+};
+Sample g_track[16]{};
+int g_trackNext = 0;
+// which of the two rows is her facing, learnt from her own walking: moving
+// under her own steam she goes the way she faces. Not judged until it's clear
+int g_axisVotes[2]{};
+
+// a lift, a fall or the top of a jump: going up or down faster than sideways,
+// or a drop no stairs give. The spot it saves isn't there to stand on when
+// the field's rebuilt, the lift's back at its start
+bool Steady(float& rise) {
+    const Sample* last = nullptr;
+    for (const Sample& s : g_track)
+        if (s.at && (!last || s.at > last->at)) last = &s;
+    rise = 0;
+    if (!last) return false;
+    float lo = last->pos.v[1], hi = lo, side = 0;
+    for (const Sample& s : g_track) {
+        if (!s.at || last->at - s.at > 500) continue;
+        lo = std::min(lo, s.pos.v[1]);
+        hi = std::max(hi, s.pos.v[1]);
+        side = std::max(side, std::hypot(s.pos.v[0] - last->pos.v[0], s.pos.v[2] - last->pos.v[2]));
+    }
+    rise = hi - lo;
+    return !((rise > 0.25f && rise > side) || rise > 2.0f);
+}
+
+int FacingAxis() {
+    const int total = g_axisVotes[0] + g_axisVotes[1];
+    if (total < 20) return -1;
+    for (int a = 0; a < 2; ++a)
+        if (g_axisVotes[a] * 5 >= total * 4) return a;
+    return -1;
+}
+
+float Along(const Sample& s, int axis, float dx, float dz) {
+    const float len = std::max(std::hypot(dx, dz), 1e-6f);
+    return std::fabs(s.axis[axis][0] * dx / len + s.axis[axis][1] * dz / len);
+}
+
+// sideways (or spinning) platforms: over the last 0.3 s she kept moving in
+// directions she wasn't facing, which walking never does. Judged step by
+// step against her facing at that step, so a sharp turn doesn't count
+bool Carried() {
+    const int axis = FacingAxis();
+    if (axis < 0) return false;
+    const Sample* last = nullptr;
+    for (const Sample& s : g_track)
+        if (s.at && (!last || s.at > last->at)) last = &s;
+    if (!last) return false;
+    int moving = 0, astray = 0;
+    float travelled = 0;
+    for (int i = 0; i < 16; ++i) {
+        const Sample& s = g_track[i];
+        const Sample& before = g_track[(i + 15) % 16];
+        if (!s.at || !before.at || s.at <= before.at || last->at - before.at > 300 || s.at - before.at > 200) continue;
+        const float dx = s.pos.v[0] - before.pos.v[0], dz = s.pos.v[2] - before.pos.v[2];
+        const float step = std::hypot(dx, dz);
+        travelled += step;
+        if (step < 0.012f) continue;
+        ++moving;
+        astray += Along(s, axis, dx, dz) < 0.7f;
+    }
+    return travelled > 0.3f && moving >= 3 && astray * 10 >= moving * 7;
+}
+
+// a short trail of ground she's stood on since the last station, newest
+// first, steady and not carried, a few steps apart. If the floor at the spot
+// isn't there on load, these come before the station: the last of them is
+// where she got on whatever moved
+constexpr int kTrailLength = 6;
+Vec4 g_trail[kTrailLength]{};
+int g_trailCount = 0;
+
+void Remember(const Vec4& at) {
+    if (g_trailCount && std::hypot(at.v[0] - g_trail[0].v[0], at.v[2] - g_trail[0].v[2]) < 4.0f) return;
+    for (int i = std::min(g_trailCount, kTrailLength - 1); i > 0; --i) g_trail[i] = g_trail[i - 1];
+    g_trail[0] = at;
+    g_trailCount = std::min(g_trailCount + 1, kTrailLength);
+}
+
+// Debug only: the leader's actor, raw, once per pause, to find what she's
+// standing on by comparing a pause on plain floor with one on a platform.
+// Plus what it points at, one hop out, since the ground she's on more likely
+// sits in her controller than in the actor itself. Only pages VirtualQuery
+// says are committed and readable get copied
+void DumpActor() {
+    static int dumps = 0;
+    if (dumps >= 40) return;
+    unsigned char* registry = *g_actorRegistry;
+    if (!registry) return;
+    static unsigned char copy[0x1000];
+    static unsigned char hops[64][0x400];
+    static DWORD hopFrom[64], hopTo[64], hopSize[64];
+    int hopCount = 0;
+    std::memset(copy, 0, sizeof copy);
+    Vec4 at{};
+    g_lock(registry + 0x6C0, nullptr, nullptr);
+    unsigned char* actor = g_resolveActor(registry, nullptr, static_cast<int>(PlayerHandle()));
+    const size_t got = actor ? Readable(actor, copy, sizeof copy) : 0;
+    // heap pointers only: the exe's own tables are the same for everyone
+    const auto image = g_base;
+    for (size_t off = 0; off + 4 <= got && hopCount < 64; off += 4) {
+        const DWORD to = *reinterpret_cast<DWORD*>(copy + off);
+        if (to < 0x10000 || (to >= image && to < image + 0x2A00000) || to >= 0x7FFF0000 || (to & 3)) continue;
+        bool seen = false;
+        for (int i = 0; i < hopCount && !seen; ++i) seen = hopTo[i] == to;
+        if (seen) continue;
+        const size_t n = Readable(reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(to)), hops[hopCount],
+                                  sizeof hops[0]);
+        if (!n) continue;
+        hopFrom[hopCount] = static_cast<DWORD>(off);
+        hopTo[hopCount] = to;
+        hopSize[hopCount] = static_cast<DWORD>(n);
+        ++hopCount;
+    }
+    if (actor) std::memcpy(at.v, actor + kActorTranslation, sizeof at.v);
+    g_unlock(registry + 0x6C0, nullptr);
+    if (!actor || !got) return;
+    const std::string dir = Folder("debug");
+    char name[40];
+    ++dumps;
+    std::snprintf(name, sizeof name, "\\pause-%02d.bin", dumps);
+    FILE* file = nullptr;
+    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
+        fwrite(copy, 1, got, file);
+        fclose(file);
+    }
+    // each hop: where in the actor it was found, where it points, how much, the bytes
+    std::snprintf(name, sizeof name, "\\pause-%02d-hops.bin", dumps);
+    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
+        for (int i = 0; i < hopCount; ++i) {
+            fwrite(&hopFrom[i], 4, 1, file);
+            fwrite(&hopTo[i], 4, 1, file);
+            fwrite(&hopSize[i], 4, 1, file);
+            fwrite(hops[i], 1, hopSize[i], file);
+        }
+        fclose(file);
+    }
+    // how she was moving just before, so each dump says what it was
+    float rise = 0;
+    const bool steady = Steady(rise);
+    float speed = 0;
+    const Sample* last = nullptr;
+    for (const Sample& s : g_track)
+        if (s.at && (!last || s.at > last->at)) last = &s;
+    if (last)
+        for (const Sample& s : g_track)
+            if (s.at && last->at - s.at > 0 && last->at - s.at <= 300)
+                speed = std::max(speed, std::hypot(last->pos.v[0] - s.pos.v[0], last->pos.v[2] - s.pos.v[2]) * 1000.0f /
+                                            static_cast<float>(last->at - s.at));
+    Footing footing;
+    const bool footed = ReadFooting(PlayerHandle(), footing);
+    Log("  dumped the leader (%p, %u bytes, %d hops) to pause-%02d, at %.2f %.2f %.2f: sideways %.2f u/s, "
+        "rise %.2f, steady %d, carried %d, facing row %d, up %.2f %.2f %.2f, floor %d (read %d), last floor %.2f %.2f %.2f",
+        static_cast<void*>(actor), static_cast<unsigned>(got), hopCount, dumps, at.v[0], at.v[1], at.v[2], speed,
+        rise, steady, Carried(), FacingAxis() * 2, *reinterpret_cast<float*>(copy + 0x88),
+        *reinterpret_cast<float*>(copy + 0x8C), *reinterpret_cast<float*>(copy + 0x90), footing.solid, footed,
+        footing.ground.v[0], footing.ground.v[1], footing.ground.v[2]);
+}
+
+// the spot as the spawn should get it: upright, since the live matrix leans
+// on slopes and lifts and a leaned start marker leaves the leader standing
+// at that angle, and a step ahead of the spot so the spawn's own step back
+// lands on it. A matrix with no heading left in it keeps the station's
+Matrix SpawnMatrix(const Matrix& saved, const float* station) {
+    Matrix out = saved;
+    float fx = saved.m[8], fz = saved.m[10];
+    float len = std::hypot(fx, fz);
+    if (len < 0.2f) {
+        fx = station[8];
+        fz = station[10];
+        len = std::max(std::hypot(fx, fz), 1e-6f);
+    }
+    fx /= len;
+    fz /= len;
+    const float rows[12] = {fz, 0, -fx, 0, 0, 1, 0, 0, fx, 0, fz, 0};
+    std::memcpy(out.m, rows, sizeof rows);
+    out.m[12] = saved.m[12] + kSpawnStep * fx;
+    out.m[14] = saved.m[14] + kSpawnStep * fz;
+    return out;
+}
+
+// FNV-1a over the save's own bytes: the .where only counts for the exact
+// save it was written with, so a station save over that slot can't be taken
+// for ours. The same bytes come back out of the reader on load
+unsigned long long Hash(const void* data, int size) {
+    unsigned long long hash = 1469598103934665603ULL;
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (int i = 0; i < size; ++i) hash = (hash ^ bytes[i]) * 1099511628211ULL;
+    return hash;
+}
+
+// for whoever opens the folder wondering what these are and if they can go
+void ExplainLocations() {
+    const std::string path = Folder("save-locations") + "\\README.txt";
+    if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES) return;
+    FILE* file = nullptr;
+    if (fopen_s(&file, path.c_str(), "w") != 0 || !file) return;
+    fputs("Where your Save Anywhere saves put you back, one file per save slot (ff13-07.where is slot 7).\n"
+          "Safe to delete: that save then loads at its save station like any other.\n"
+          "A file only counts while it matches its save, and one is removed when you save over that slot\n"
+          "at a station.\n",
+          file);
+    fclose(file);
+}
+
+std::string WherePath(int slot) {
+    char name[32];
+    std::snprintf(name, sizeof name, "\\ff13-%02d.where", slot);
+    return Folder("save-locations") + name;
+}
+
+// where spots used to live, right beside the add-on, and the debug dumps
+// with them: moved into their folders once, never over a newer one
+void Tidy() {
+    const std::string top(g_dir.begin(), g_dir.end());
+    for (const char* pattern : {"ff13-*.where", "pause-*.bin"}) {
+        WIN32_FIND_DATAA found{};
+        HANDLE search = FindFirstFileA((top + "\\" + pattern).c_str(), &found);
+        if (search == INVALID_HANDLE_VALUE) continue;
+        const std::string to = Folder(pattern[0] == 'f' ? "save-locations" : "debug");
+        if (pattern[0] == 'f') ExplainLocations();
+        do {
+            if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            MoveFileExA((top + "\\" + found.cFileName).c_str(), (to + "\\" + found.cFileName).c_str(), 0);
+        } while (FindNextFileA(search, &found));
+        FindClose(search);
+    }
+}
+
+void WriteWhere(const SlotHash& save) {
+    ExplainLocations();
+    FILE* file = nullptr;
+    if (fopen_s(&file, WherePath(save.slot).c_str(), "w") != 0 || !file) {
+        Log("couldn't write %s", WherePath(save.slot).c_str());
+        return;
+    }
+    const float* m = g_savedMatrix.m;
+    // 4: made with the full state guard. A 3 is from before it, and loading one
+    // never counts as a state a station could save
+    fprintf(file, "xiii-save-anywhere 4\nhash %016llx\npoint ", save.hash);
+    for (unsigned char b : g_savedPoint.bytes) fprintf(file, "%02x", b);
+    fprintf(file, "\npos %.6f %.6f %.6f\nmatrix", m[12], m[13], m[14]);
+    for (float f : g_savedMatrix.m) fprintf(file, " %.9g", f);
+    fprintf(file, "\ntrail %d", g_savedTrailCount);
+    for (int i = 0; i < g_savedTrailCount; ++i)
+        fprintf(file, " %.6f %.6f %.6f", g_savedTrail[i].v[0], g_savedTrail[i].v[1], g_savedTrail[i].v[2]);
+    fprintf(file, "\n");
+    fclose(file);
+    Log("saved slot %d at %.2f %.2f %.2f", save.slot, m[12], m[13], m[14]);
+    static Progress savedAt;
+    ReadProgress(savedAt);
+    LogProgress("  saved with", savedAt);
+}
+
+bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& matrix, int* format = nullptr,
+               Vec4* trail = nullptr, int* trailCount = nullptr) {
+    FILE* file = nullptr;
+    if (fopen_s(&file, WherePath(slot).c_str(), "r") != 0 || !file) return false;
+    char hex[40]{};
+    int version = 0;
+    float pos[3]{};
+    bool ok = fscanf_s(file, "xiii-save-anywhere %d hash %llx point %32s pos %f %f %f matrix", &version, &hash, hex,
+                       static_cast<unsigned>(sizeof hex), &pos[0], &pos[1], &pos[2]) == 6 &&
+              (version == 3 || version == 4) && std::strlen(hex) == 32;
+    if (format) *format = version;
+    for (int i = 0; ok && i < 16; ++i) ok = fscanf_s(file, "%f", &matrix.m[i]) == 1 && std::isfinite(matrix.m[i]);
+    // older files have no trail, which only means the station's the fallback
+    int count = 0;
+    if (ok && trail && trailCount && fscanf_s(file, " trail %d", &count) == 1 && count > 0 && count <= kTrailLength) {
+        int read = 0;
+        for (; read < count; ++read) {
+            Vec4& v = trail[read];
+            v = {};
+            if (fscanf_s(file, "%f %f %f", &v.v[0], &v.v[1], &v.v[2]) != 3 || !std::isfinite(v.v[0]) ||
+                !std::isfinite(v.v[1]) || !std::isfinite(v.v[2]))
+                break;
+            v.v[3] = 1.0f;
+        }
+        *trailCount = read;
+    } else if (trailCount) {
+        *trailCount = 0;
+    }
+    fclose(file);
+    if (!ok) return false;
+    for (int i = 0; i < 16; ++i) {
+        unsigned byte = 0;
+        sscanf_s(hex + i * 2, "%2x", &byte);
+        point.bytes[i] = static_cast<unsigned char>(byte);
+    }
+    return true;
+}
+
+// "ff13-07.dat", maybe with a path in front: 7, or -1 for anything else
+int SlotOf(const char* name) {
+    if (!name) return -1;
+    const char* base = name;
+    for (const char* p = name; *p; ++p)
+        if (*p == '\\' || *p == '/') base = p + 1;
+    if (_strnicmp(base, "ff13-", 5) != 0 || base[5] < '0' || base[5] > '9' || base[6] < '0' || base[6] > '9' ||
+        _stricmp(base + 7, ".dat") != 0)
+        return -1;
+    return (base[5] - '0') * 10 + (base[6] - '0');
+}
+
+// the writer formats the slot's name from its own byte at +0x14A. Only our
+// save is recorded: a station's own save over a slot just leaves the old
+// .where behind, and the hash stops matching it
+int __fastcall SaveWriteHook(unsigned char* self, void* edx, int a, int b, const void* data, int size) {
+    if (!g_ourSave.load() && g_stateForFiles.load() == kStateSave) {
+        g_sanction = kStation;
+        // a station save over a slot leaves that slot's spot matching nothing,
+        // so it goes rather than piling up
+        const int slot = static_cast<signed char>(self[0x14A]);
+        if (slot >= 0 && DeleteFileA(WherePath(slot).c_str())) g_staleSlot = slot;
+    }
+    if (g_ourSave.load() && data && size > 0) {
+        const SlotHash save{static_cast<signed char>(self[0x14A]), Hash(data, size)};
+        EnterCriticalSection(&g_fileLock);
+        g_written = save;
+        LeaveCriticalSection(&g_fileLock);
+    }
+    return g_saveWrite(self, edx, a, b, data, size);
+}
+
+// the load screen reads every slot to list them, then the one you pick.
+// Only outside the field, so the save screen's own listing never reads as a
+// load, and the last one standing is the one that's loading
+int __fastcall SaveReadHook(unsigned char* self, void* edx, int a, void* out, int size) {
+    const int result = g_saveRead(self, edx, a, out, size);
+    const int state = g_stateForFiles.load();
+    const int slot = SlotOf(reinterpret_cast<const char*>(self + 0x172));
+    if (slot >= 0 && out && size > 0 && state != kStateFieldIdle && state != kStateFieldPause &&
+        state != kStateFieldPauseWait && state != kStateSave) {
+        const SlotHash load{slot, Hash(out, size), GetTickCount64()};
+        EnterCriticalSection(&g_fileLock);
+        g_loaded = load;
+        LeaveCriticalSection(&g_fileLock);
+        g_sanction = kLoad;
+        g_startWanted = true;
+    }
+    return result;
+}
+
+DWORD& Mask(unsigned char* pad, DWORD offset) { return *reinterpret_cast<DWORD*>(pad + offset); }
+
+bool Pressed(unsigned char* pad) { return (Mask(pad, kPadPressed) >> g_button) & 1; }
+
+// only the edges. Held stays, because it becomes next frame's "last": clear
+// it and the same press reads as brand new a frame later
+void Swallow(unsigned char* pad) {
+    const DWORD keep = ~(1u << g_button);
+    Mask(pad, kPadPressed) &= keep;
+    Mask(pad, kPadRepeat) &= keep;
+    Mask(pad, kPadRepeatToo) &= keep;
+}
+
+// first few presses on the pause screen, so a wrong button index shows up in
+// the log as the index that did light up
+void LearnButtons(unsigned char* pad) {
+    const DWORD pressed = Mask(pad, kPadPressed);
+    for (int i = 0; i < 16 && g_learnLines < 12; ++i) {
+        if (!((pressed >> i) & 1)) continue;
+        Trace("pause screen: button %d pressed%s", i, i == g_button ? " (save)" : "");
+        ++g_learnLines;
+    }
+}
+
+bool CanSave() {
+    // the station this save would load at has to be in what's loaded right now
+    return g_findSavePointRow() != nullptr && PlayerHandle() != 0xFFFFFFFF;
+}
+
+// whether Save goes on the bar, and why not when it doesn't
+const char* Withheld() {
+    if (!CanSave()) return "this area's save point isn't loaded";
+    if (g_sanctioned.story < 0) return "you haven't been at a station since this field started";
+    static Progress now;
+    ReadProgress(now);
+    static char why[96];
+    if (g_sceneSince >= 0) {
+        std::snprintf(why, sizeof why, "a scene ran (state %d) since you were last at a station", g_sceneSince);
+        return why;
+    }
+    if (const char* moved = Moved(now)) {
+        std::snprintf(why, sizeof why, "%s since you were last at a station", moved);
+        return why;
+    }
+    Footing footing;
+    if (!ReadFooting(PlayerHandle(), footing) || !footing.solid)
+        return "she isn't on the level's own floor (a lift, a platform, mid-air, or not moved since loading)";
+    float rise = 0;
+    if (!Steady(rise)) return "you were going up or down (a lift, a fall or a jump)";
+    if (Carried()) return "something was carrying you (a moving platform)";
+    return nullptr;
+}
+
+void SetPhase(Phase phase) {
+    g_phase = phase;
+    g_phaseStart = GetTickCount64();
+}
+
+ULONGLONG PhaseMs() { return GetTickCount64() - g_phaseStart; }
+
+void StartSave() {
+    const DWORD handle = PlayerHandle();
+    if (!ReadMatrix(handle, g_savedMatrix)) {
+        Log("no player position, not saving");
+        return;
+    }
+    g_getSavePoint(g_savedPoint.bytes);
+    std::copy(g_trail, g_trail + g_trailCount, g_savedTrail);
+    g_savedTrailCount = g_trailCount;
+    // the pause screen only closes through its own Resume, so it gets one:
+    // a frame of Start, the button that resumes. Firing the zone's PAUSE_REQ
+    // instead moved the state machine on but left the screen up
+    g_pressStart = true;
+    SetPhase(Phase::Resuming);
+    Log("save requested from pause");
+}
+
+void FinishSave() {
+    EnterCriticalSection(&g_fileLock);
+    const SlotHash written = g_written;
+    g_written = {};
+    LeaveCriticalSection(&g_fileLock);
+    g_ourSave = false;
+    if (written.slot < 0) {
+        Log("save screen closed without saving");
+        return;
+    }
+    // nothing runs behind the save screen, so this never should. If it did,
+    // the save stands as a plain one and loads at its station
+    static Progress after;
+    ReadProgress(after);
+    if (const char* moved = g_sceneSince >= 0 ? "a scene ran" : Moved(after)) {
+        Log("slot %d saved, but %s while saving, so it keeps no spot", written.slot, moved);
+        return;
+    }
+    WriteWhere(written);
+}
+
+void TickSave(int state) {
+    if (g_swallow > 0) --g_swallow;
+    switch (g_phase) {
+    case Phase::Idle:
+        break;
+    case Phase::Resuming:
+        if (state == kStateFieldIdle) {
+            // the world ran again for the frames it took to resume, so the
+            // guard's asked once more right before the save screen opens
+            if (const char* why = Withheld()) {
+                Log("save dropped, %s", why);
+                SetPhase(Phase::Idle);
+                break;
+            }
+            g_ourSave = true;
+            g_zoneFire(Zone(), nullptr, kTrgSaveReq);
+            SetPhase(Phase::Requested);
+        } else if (PhaseMs() > 5000) {
+            Log("never got back to free roam (state %d), save dropped", state);
+            SetPhase(Phase::Idle);
+        }
+        break;
+    case Phase::Requested:
+        if (state == kStateSave) {
+            SetPhase(Phase::Saving);
+        } else if (PhaseMs() > 3000) {
+            g_ourSave = false;
+            Log("the game didn't take the save request (state %d)", state);
+            SetPhase(Phase::Idle);
+        }
+        break;
+    case Phase::Saving:
+        if (state != kStateSave) SetPhase(Phase::Settling);
+        break;
+    case Phase::Settling:
+        // give the write a moment to land before hashing it
+        if (PhaseMs() > 500) {
+            FinishSave();
+            SetPhase(Phase::Idle);
+        }
+        break;
+    }
+}
+
+int StartMarker() {
+    auto* field = static_cast<unsigned char*>(*g_fieldStart);
+    void* holder = field ? *reinterpret_cast<void**>(field + 0x40) : nullptr;
+    return holder ? g_startMarker(holder, nullptr) : -1;
+}
+
+// the first lookup of the field's start marker after a save of ours was read
+// decides it: the save's .where has to match (bytes, save point, a real spot)
+// or nothing's armed and every answer stays the game's. Anything off and you
+// start at the station, same as vanilla
+void TryArm(int marker) {
+    EnterCriticalSection(&g_fileLock);
+    const SlotHash load = g_loaded;
+    LeaveCriticalSection(&g_fileLock);
+    // a save read a while back that never reached a field isn't this one
+    if (load.slot < 0 || GetTickCount64() - load.at > 120000 || !g_enabled || marker != StartMarker()) return;
+    EnterCriticalSection(&g_fileLock);
+    g_loaded = {};
+    LeaveCriticalSection(&g_fileLock);
+
+    unsigned long long stored = 0;
+    SavePoint point{}, now{};
+    Matrix saved{};
+    int format = 0;
+    if (!ReadWhere(load.slot, stored, point, saved, &format, g_fallback, &g_fallbackCount)) {
+        Log("loaded slot %d, which has no spot of ours", load.slot);
+    } else if (load.hash != stored) {
+        Log("slot %d was saved over since its spot was kept, starting at the station", load.slot);
+    } else if (g_getSavePoint(now.bytes), !(now == point)) {
+        Log("slot %d spawns at a different save point than it was saved at, starting at the station", load.slot);
+    } else if (saved.m[12] == 0.0f && saved.m[13] == 0.0f && saved.m[14] == 0.0f) {
+        Log("slot %d's spot reads as the origin, starting at the station", load.slot);
+    } else {
+        // turned into the spawn's matrix on the first answer, against the station's
+        g_spawn = {true, marker, GetTickCount64() + 20000, saved, load.slot, 0};
+        g_landTarget = Translation(saved.m);
+        g_landCheckAt = GetTickCount64() + 2500;
+        g_landGiveUp = GetTickCount64() + 15000;
+        g_landSeenAt = g_rescueAt = 0;
+        g_rescues = 0;
+        g_fallbackAt = -1;
+        // made under the full guard, so it's a state a station could save
+        if (format >= 4) g_sanction = kOurs;
+        Log("slot %d: start marker %d answers with %.2f %.2f %.2f", load.slot, marker, saved.m[12], saved.m[13],
+            saved.m[14]);
+    }
+}
+
+// the leader's matrix becomes the save's heading, upright, a step ahead of
+// the spot, and the other two move by the same amount so the party stays
+// where it always is around the leader
+int __fastcall MarkerLookupHook(void* manager, void* edx, int marker, float* out0, float* out1, float* out2) {
+    const int count = g_markerLookup(manager, edx, marker, out0, out1, out2);
+    if (count <= 0 || !out0) return count;
+    // the game's own answer for where this field starts, before ours replaces it
+    if (g_startWanted && marker == StartMarker()) {
+        g_startPos = Translation(out0);
+        g_startWanted = false;
+    }
+    if (!g_spawn.armed) TryArm(marker);
+    if (!g_spawn.armed || marker != g_spawn.marker) return count;
+    if (GetTickCount64() > g_spawn.until) {
+        g_spawn.armed = false;
+        return count;
+    }
+    const Vec4 station = Translation(out0);
+    if (g_spawn.answered == 0) {
+        g_stationPos = station;
+        g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0);
+    }
+    float delta[3];
+    for (int i = 0; i < 3; ++i) delta[i] = g_spawn.matrix.m[12 + i] - station.v[i];
+    std::memcpy(out0, g_spawn.matrix.m, sizeof g_spawn.matrix.m);
+    float* party[] = {out1, out2};
+    for (int member = 0; member < 2 && member + 1 < count; ++member)
+        if (party[member])
+            for (int i = 0; i < 3; ++i) party[member][12 + i] += delta[i];
+    if (g_spawn.answered++ < 6) {
+        const DWORD from = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) - g_base);
+        Trace("  marker %d asked from %#lx (%d matrices): station %.2f %.2f %.2f, answered with the save's", marker,
+            from, count, station.v[0], station.v[1], station.v[2]);
+    }
+    return count;
+}
+
+void __fastcall AreaEnterHook(void* self, void* edx, void* a, void* point) {
+    g_areaEnter(self, edx, a, point);
+    // taken on the game thread's next tick, where the state can be read
+    g_areaEntered = true;
+}
+
+// keeps a state as the sanctioned one, saying so only when it's news
+void Sanctify(const char* where) {
+    static Progress now;
+    ReadProgress(now);
+    const bool news = g_sanctioned.story < 0 || Moved(now) || g_sceneSince >= 0;
+    g_sanctioned = now;
+    g_sceneSince = -1;
+    g_trailCount = 0;
+    if (news) Log("story %d at %s", now.story, where);
+}
+
+// every frame from 2.5 s after the spawn. This is the check that doesn't care
+// what kind of platform it was: if the floor you saved on is there in the
+// rebuilt field you stand on it, and if it isn't (a lift back at its start, a
+// platform somewhere else on its path, a save in mid air) you drop, and a
+// drop of more than a step moves you on before you land anywhere: to the
+// ground you walked on just before, newest first, and the station last.
+// Each of those gets the same drop check. Right after a load the handle
+// points at a stand-in for a few seconds, so only reads by the target count
+void NextFallback(DWORD handle, ULONGLONG now, const char* why) {
+    g_spawn.armed = false;
+    ++g_fallbackAt;
+    if (g_fallbackAt > g_fallbackCount) {
+        Log("%s, and there's nowhere left to try, staying put", why);
+        g_landCheckAt = 0;
+        return;
+    }
+    const bool station = g_fallbackAt == g_fallbackCount;
+    g_landTarget = station ? g_stationPos : g_fallback[g_fallbackAt];
+    Log("%s, trying %s at %.2f %.2f %.2f", why, station ? "the station" : "where you walked before",
+        g_landTarget.v[0], g_landTarget.v[1], g_landTarget.v[2]);
+    g_setPosFlash(handle, g_landTarget.v, 0);
+    g_rescueAt = now;
+    g_rescues = 1;
+    g_landSeenAt = 0;
+}
+
+void TickLoad(int state) {
+    if (!g_landCheckAt || state != kStateFieldIdle || GetTickCount64() < g_landCheckAt) return;
+    const ULONGLONG now = GetTickCount64();
+    Vec4 at{};
+    const DWORD handle = PlayerHandle();
+    const bool read = Position(handle, at);
+    // the stand-in sits at 0 1.5 -10 whatever the field
+    const bool standIn = std::fabs(at.v[0]) < 0.01f && std::fabs(at.v[1] - 1.5f) < 0.01f && std::fabs(at.v[2] + 10.0f) < 0.01f;
+    const float flat = read && !standIn ? std::hypot(at.v[0] - g_landTarget.v[0], at.v[2] - g_landTarget.v[2]) : 1e9f;
+    const float drop = g_landTarget.v[1] - at.v[1];
+    // straight down, not walking off down some stairs: those cover more ground than height
+    if (flat < 3.0f && drop > 1.0f && flat < drop) {
+        char why[96];
+        std::snprintf(why, sizeof why, "dropped to %.2f %.2f %.2f, the floor isn't there", at.v[0], at.v[1], at.v[2]);
+        NextFallback(handle, now, why);
+        return;
+    }
+    if (flat < 3.0f) {
+        if (!g_landSeenAt) g_landSeenAt = now;
+        // stood there a few seconds without dropping: the floor's real
+        if (now - g_landSeenAt < (g_fallbackAt < 0 ? 4000u : 2000u)) return;
+        Log("landed at %.2f %.2f %.2f, %.2f across and %.2f up from where it aimed", at.v[0], at.v[1], at.v[2], flat,
+            at.v[1] - g_landTarget.v[1]);
+    } else if (g_rescueAt) {
+        // a move that didn't take gets another go, the way the move onto the
+        // spot got pulled back, then the next place along
+        if (now - g_rescueAt < 1000) return;
+        if (g_rescues < 3) {
+            g_setPosFlash(handle, g_landTarget.v, 0);
+            g_rescueAt = now;
+            ++g_rescues;
+            return;
+        }
+        NextFallback(handle, now, "the move didn't take");
+        return;
+    } else if (read && Distance(at, g_stationPos) < 5.0f) {
+        Log("started at the station (%.2f %.2f %.2f) after all", at.v[0], at.v[1], at.v[2]);
+    } else if (now < g_landGiveUp) {
+        return;
+    } else {
+        Log("never saw the player near the spot or the station (last read %.2f %.2f %.2f)", at.v[0], at.v[1], at.v[2]);
+    }
+    g_landCheckAt = 0;
+    g_spawn.armed = false;
+}
+
+// XIII reads pads through DirectInput and folds the keyboard in through its
+// own bindings, and on the pause screen the save button never showed up in
+// that mask. So the press is also read straight off the hardware: the key the
+// game binds to it, and the same button on any XInput pad. Each source keeps
+// its own last state so a hold is one press
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, void*);
+XInputGetStateFn g_xinputGetState = nullptr;
+int g_saveKey = 'E';
+bool g_keyWas = false;
+bool g_padWas[4]{};
+int g_padIdle[4]{};
+int g_sourceLines = 0;
+
+struct XInputState {
+    DWORD packet;
+    WORD buttons;
+    BYTE leftTrigger, rightTrigger;
+    SHORT thumbs[4];
+};
+
+// XInput's bit for each of XIII's mask bits that has one
+WORD XInputBit(int bit) {
+    switch (bit) {
+    case 5: return 0x1000;
+    case 7: return 0x2000;
+    case 6: return 0x4000;
+    case 4: return 0x8000;
+    case 15: return 0x0010;
+    case 14: return 0x0020;
+    default: return 0;
+    }
+}
+
+void LoadXInput() {
+    for (const wchar_t* name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"}) {
+        if (HMODULE module = LoadLibraryW(name)) {
+            g_xinputGetState = reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void*>(GetProcAddress(module, "XInputGetState")));
+            if (g_xinputGetState) return;
+        }
+    }
+}
+
+bool GameHasFocus() {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid == GetCurrentProcessId();
+}
+
+// a fresh press from the keyboard or an XInput pad, or what's still held,
+// read only on the pause screen and while saving: XInputGetState on an empty
+// slot is slow, so it's never polled out in the field
+const char* RawPress(bool& held) {
+    const char* source = nullptr;
+    held = false;
+    const bool key = GameHasFocus() && (GetAsyncKeyState(g_saveKey) & 0x8000);
+    if (key && !g_keyWas) source = "keyboard";
+    held = held || key;
+    g_keyWas = key;
+    const WORD want = XInputBit(g_button);
+    for (DWORD user = 0; want && g_xinputGetState && user < 4; ++user) {
+        // an empty slot costs real time to ask about, so one that came back
+        // empty is left a couple of seconds before it's asked again
+        if (g_padIdle[user] > 0) {
+            --g_padIdle[user];
+            continue;
+        }
+        XInputState state{};
+        const DWORD result = g_xinputGetState(user, &state);
+        if (result == ERROR_DEVICE_NOT_CONNECTED) g_padIdle[user] = 120;
+        const bool down = result == ERROR_SUCCESS && (state.buttons & want);
+        if (down && !g_padWas[user] && !source) source = "controller";
+        held = held || down;
+        g_padWas[user] = down;
+    }
+    return source;
+}
+
+unsigned char* g_pauseWidget = nullptr;
+ULONGLONG g_pauseSetAt = 0;
+int g_pauseLooks = 0;
+int g_idLines = 0;
+void LogSlots(const char* when);
+
+void Tick() {
+    const bool pressed = g_pressed;
+    g_pressed = false;
+    const int state = State();
+    g_stateForFiles = state;
+    if (state < 0) return;
+
+    const ULONGLONG now = GetTickCount64();
+    const int stale = g_staleSlot.exchange(-1);
+    if (stale >= 0) Log("slot %d saved at a station, its save anywhere spot is gone with the old save", stale);
+    if (state != kStateFieldIdle) g_idleSince = 0;
+    else if (!g_idleSince) g_idleSince = now;
+    // a new field's coordinates aren't the old one's
+    if (state == 1 || state == 2) g_trailCount = 0;
+    const Sample& prev = g_track[(g_trackNext + 15) % 16];
+    if (state == kStateFieldIdle && now - prev.at >= 40) {
+        Matrix m{};
+        if (ReadMatrix(PlayerHandle(), m)) {
+            Sample next{now, Translation(m.m), {{m.m[0], m.m[2]}, {m.m[8], m.m[10]}}};
+            for (auto& a : next.axis) {
+                const float len = std::max(std::hypot(a[0], a[1]), 1e-6f);
+                a[0] /= len;
+                a[1] /= len;
+            }
+            // walking pace, level: that's her moving herself, so it says which way she faces
+            const float dx = next.pos.v[0] - prev.pos.v[0], dz = next.pos.v[2] - prev.pos.v[2];
+            const float pace = std::hypot(dx, dz) * 1000.0f / static_cast<float>(now - prev.at);
+            if (prev.at && now - prev.at < 200 && pace > 1.5f && pace < 12.0f &&
+                std::fabs(next.pos.v[1] - prev.pos.v[1]) < 0.05f && g_axisVotes[0] + g_axisVotes[1] < 100000)
+                for (int a = 0; a < 2; ++a) g_axisVotes[a] += Along(next, a, dx, dz) > 0.9f;
+            g_track[g_trackNext++ % 16] = next;
+            float rise = 0;
+            Footing footing;
+            if (g_sanctioned.story >= 0 && g_sceneSince < 0 && Steady(rise) && !Carried() &&
+                ReadFooting(PlayerHandle(), footing) && footing.solid)
+                Remember(next.pos);
+        }
+    }
+    if (InScene(state) && g_sceneSince < 0 && g_sanctioned.story >= 0) {
+        g_sceneSince = state;
+        Log("scene (state %d), save anywhere waits for the next station", state);
+    }
+    if (g_areaEntered.exchange(false) && state == kStateFieldIdle) {
+        Sanctify("a station");
+        // a load that started you inside the area is settled by this too
+        if (g_sanction == kLoad) g_sanction = kNone;
+    }
+    // whatever was sanctioned before belongs to the field that's gone
+    if (g_sanction == kLoad || g_sanction == kOurs) g_sanctioned.story = -1;
+    // settled for 2 s past the stand-in, the way the land check waits
+    if (g_sanction != kNone && g_idleSince && now - g_idleSince > 2000) {
+        if (g_sanction == kStation) {
+            Sanctify("the last station save");
+            g_sanction = kNone;
+        } else if (g_sanction == kOurs) {
+            Sanctify("a save anywhere load");
+            g_sanction = kNone;
+        } else {
+            // a plain load counts once you're seen standing at the station it
+            // started you at. The stand-in at 0 1.5 -10 isn't you yet
+            Vec4 at{};
+            const bool read = Position(PlayerHandle(), at);
+            const bool standIn = std::fabs(at.v[0]) < 0.01f && std::fabs(at.v[1] - 1.5f) < 0.01f &&
+                                 std::fabs(at.v[2] + 10.0f) < 0.01f;
+            if (read && !standIn) {
+                if (std::hypot(at.v[0] - g_startPos.v[0], at.v[2] - g_startPos.v[2]) < 6.0f &&
+                    std::fabs(at.v[1] - g_startPos.v[1]) < 4.0f)
+                    Sanctify("the station this load started at");
+                else
+                    Log("loaded away from a station, save anywhere waits until you reach one");
+                g_sanction = kNone;
+            } else if (now - g_idleSince > 15000) {
+                Log("never saw where this load started, save anywhere waits until you reach a station");
+                g_sanction = kNone;
+            }
+        }
+    }
+    if (state == kStateFieldPause && g_lastState != kStateFieldPause && g_phase == Phase::Idle && g_enabled) {
+        if (const char* why = Withheld()) Log("save not offered: %s", why);
+        if (g_debug) {
+            static Progress pausedAt;
+            ReadProgress(pausedAt);
+            LogProgress("paused", pausedAt);
+            DumpActor();
+        }
+    }
+
+    const bool watching = state == kStateFieldPause || g_phase != Phase::Idle;
+    bool rawHeld = false;
+    const char* raw = watching ? RawPress(rawHeld) : nullptr;
+    // only with Save on the bar: with Quit's confirm box up, the Start we press
+    // to resume would land on that instead
+    if (state == kStateFieldPause && g_phase == Phase::Idle && g_enabled && (g_decorated || !g_prompt) &&
+        (pressed || raw)) {
+        if (g_sourceLines < 6) {
+            ++g_sourceLines;
+            Log("save pressed (%s)", pressed ? "game pad mask" : raw);
+        }
+        if (const char* why = Withheld()) Log("save pressed, but %s", why);
+        else StartSave();
+    }
+    // the press that started a save would otherwise land in the field as it
+    // resumes, where Y opens the main menu. So from the save starting until
+    // it's let go, and a beat after, that button's presses are eaten. Only
+    // ours: a Y in normal play never gets near this
+    if (g_phase == Phase::Resuming || g_phase == Phase::Requested) g_eatUntilUp = true;
+    else if (!rawHeld && !g_heldLastFrame) g_eatUntilUp = false;
+    if (g_eatUntilUp) g_swallow = 15;
+    g_heldLastFrame = false;
+    // the bar again a beat after it was built and a second after, in case
+    // something sets it again behind the mode setter
+    if (g_pauseLooks > 0 && g_pauseWidget) {
+        const ULONGLONG since = GetTickCount64() - g_pauseSetAt;
+        if ((g_pauseLooks == 2 && since > 150) || (g_pauseLooks == 1 && since > 1200)) {
+            LogSlots(g_pauseLooks == 2 ? "0.15s" : "1.2s");
+            --g_pauseLooks;
+        }
+    }
+    TickSave(state);
+    if (g_phase == Phase::Idle && g_enabled) TickLoad(state);
+    g_lastState = state;
+}
+
+// XIII's text glyphs are 0xF1 then 0x40 + the button's place in its prompt
+// order: confirm, cancel, face left, face top, menu. Keyed by pad mask bit
+int GlyphFor(int bit) {
+    switch (bit) {
+    case 5: return 0;
+    case 7: return 1;
+    case 6: return 2;
+    case 4: return 3;
+    case 15: return 4;
+    default: return -1;
+    }
+}
+
+// what the pause bar holds, for the log: the same two virtual hops the mode
+// setter takes to each slot's label, and the text pointer its text box keeps
+using VirtualFn = void*(__fastcall*)(void*, void*);
+
+void* Virtual(void* object, int offset) {
+    if (!object) return nullptr;
+    auto* table = *static_cast<VirtualFn**>(object);
+    return table[offset / 4](object, nullptr);
+}
+
+void LogSlots(const char* when) {
+    auto* slots = g_pauseWidget ? *reinterpret_cast<unsigned char**>(g_pauseWidget + 0x34) : nullptr;
+    if (!slots) return;
+    for (int slot : {4, 8, 0xC, 0x10}) {
+        void* component = *reinterpret_cast<void**>(slots + slot);
+        if (!component) {
+            Trace("  %s slot +%#x: none", when, slot);
+            continue;
+        }
+        auto* label = static_cast<unsigned char*>(Virtual(Virtual(component, 0x10), 0x44));
+        const char* text = label ? *reinterpret_cast<const char**>(label + 0xE0 + 0x1A8) : nullptr;
+        char shown[160]{};
+        int at = 0;
+        for (int i = 0; text && text[i] && i < 40 && at < 150; ++i) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            at += c >= 0x20 && c < 0x7F ? std::snprintf(shown + at, sizeof shown - at, "%c", c)
+                                        : std::snprintf(shown + at, sizeof shown - at, "<%02X>", c);
+        }
+        Trace("  %s slot +%#x: component %p vt %p label %p text %p \"%s\"%s", when, slot, component,
+            *static_cast<void**>(component), label, text, shown, text == g_saveLabel ? " (ours)" : "");
+    }
+}
+
+unsigned short& TextFlags(unsigned char* text) { return *reinterpret_cast<unsigned short*>(text + 0xC); }
+
+// the pause bar is one string, "$pause_03": "[Back]Quit   [Start]Resume",
+// right-aligned. The other label, "$pause_01", is a lone "[Start]Resume"
+// sitting right on top of that string's tail, which is where everything we
+// put there before ended up drawn. So Save goes on the front of the bar's own
+// string, three spaces like the game's, and its layout spaces all three.
+// The text is set once, in the game's own pass
+void __fastcall TextSetIdHook(unsigned char* text, void* edx, const char* id, int arg) {
+    if (g_pauseWidget && g_idLines < 24 && GetTickCount64() - g_pauseSetAt < 50) {
+        ++g_idLines;
+        Trace("  text id \"%s\"%s", id ? id : "(null)", g_relabel ? " (relabelling)" : "");
+    }
+    if (!g_relabel || !id) return g_textSetId(text, edx, id, arg);
+    // bit 1 is "owns a text resource": a fresh string never does, and ours
+    // never should, since the destructor frees what that bit says it owns
+    if (std::strcmp(id, "$pause_03") == 0) {
+        // the mode setter reuses one string for both labels, so this one
+        // still holds Resume's resource. The game's own lookup lets that go
+        // and takes the bar's; the bar's is copied, then let go the way the
+        // destructor would, and the string reset for ours
+        g_textSetId(text, edx, id, arg);
+        const char* bar = (TextFlags(text) & 1)
+            ? *reinterpret_cast<const char**>(text + 4) + *reinterpret_cast<short*>(text + 0xE)
+            : nullptr;
+        if (!bar) return;
+        std::snprintf(g_barLabel, sizeof g_barLabel, "%s   %s", g_saveLabel, bar);
+        g_textDtor(text, nullptr);
+        g_textCtor(text, nullptr);
+        *reinterpret_cast<const char**>(text + 4) = g_barLabel;
+        *reinterpret_cast<const char**>(text + 8) = id;
+        *reinterpret_cast<unsigned short*>(text + 0xE) = 0;
+        // the state the game's own direct table lookup leaves: valid, not owned
+        TextFlags(text) = (TextFlags(text) | 1) & ~2;
+        g_relabelled = 1;
+        return;
+    }
+    g_textSetId(text, edx, id, arg);
+}
+
+// the setter skips the rebuild when the mode hasn't changed, so with Save on
+// the screen last time, or wanted this time, it's forced to rebuild from the
+// game's own text ids first. Save only goes on in a field pause, with the
+// station this save would load at in what's loaded
+void __fastcall PauseModeHook(unsigned char* widget, void* edx, int mode) {
+    const int state = State();
+    const bool want = g_enabled && g_prompt && g_phase == Phase::Idle &&
+                      (state == kStateFieldPause || state == kStateFieldPauseWait) && !Withheld();
+    if (want || g_decorated) *reinterpret_cast<int*>(widget + 0x70) = -1;
+    g_relabel = want && mode != 0;
+    g_relabelled = 0;
+    // the widget is only kept for the traces that read the bar back
+    const bool logging = g_debug && g_pauseLogLines < 8;
+    if (logging) {
+        g_pauseWidget = widget;
+        g_pauseSetAt = GetTickCount64();
+        Trace("pause labels: widget %p mode %d (was %d), state %d, want %d", widget, mode,
+            *reinterpret_cast<int*>(widget + 0x70), state, want);
+    }
+    g_pauseMode(widget, edx, mode);
+    g_relabel = false;
+    g_decorated = g_relabelled == 1;
+    if (logging) {
+        ++g_pauseLogLines;
+        Trace("  relabelled %d, save %s", g_relabelled, g_decorated ? "shown" : "not shown");
+        LogSlots("set");
+        g_pauseLooks = 2;
+    }
+}
+
+LONGLONG g_costMax = 0, g_costSum = 0;
+int g_costFrames = 0;
+ULONGLONG g_costSince = 0;
+
+void Cost(LONGLONG ticks) {
+    g_costMax = std::max(g_costMax, ticks);
+    g_costSum += ticks;
+    ++g_costFrames;
+    const ULONGLONG now = GetTickCount64();
+    if (!g_costSince) g_costSince = now;
+    if (now - g_costSince < 60000) return;
+    LARGE_INTEGER rate;
+    QueryPerformanceFrequency(&rate);
+    const double us = 1e6 / static_cast<double>(rate.QuadPart);
+    Log("cost over the last minute: %.1f us a frame on average, %.1f us at most, %d frames",
+        g_costSum * us / g_costFrames, g_costMax * us, g_costFrames);
+    g_costMax = g_costSum = 0;
+    g_costFrames = 0;
+    g_costSince = now;
+}
+
+// runs for every pad, every frame. Presses from any of them count, and the
+// frame's logic runs once, on whichever pad the game updated first
+void __fastcall PadUpdateHook(void* self, void* edx, void* arg) {
+    g_padUpdate(self, edx, arg);
+    auto* pad = static_cast<unsigned char*>(self);
+    if (!g_leadPad) g_leadPad = self;
+    if (g_debug && g_lastState == kStateFieldPause && g_phase == Phase::Idle) LearnButtons(pad);
+    if (g_swallow == 0) g_pressed = g_pressed || Pressed(pad);
+    g_heldLastFrame = g_heldLastFrame || ((Mask(pad, kPadHeld) >> g_button) & 1);
+    if (self == g_leadPad) {
+        if (g_debug) {
+            // what the add-on costs a frame, for anyone wondering if it's the lag
+            LARGE_INTEGER a, b;
+            QueryPerformanceCounter(&a);
+            Tick();
+            QueryPerformanceCounter(&b);
+            Cost(b.QuadPart - a.QuadPart);
+        } else {
+            Tick();
+        }
+    }
+    if (g_swallow > 0) Swallow(pad);
+    // Start for one frame, held and pressed, on the pad the frame's logic
+    // runs on. Next frame the hardware says it's up and it reads as a tap
+    if (g_pressStart && self == g_leadPad) {
+        g_pressStart = false;
+        constexpr DWORD start = 1u << 15;
+        Mask(pad, kPadHeld) |= start;
+        Mask(pad, kPadPressed) |= start;
+        Mask(pad, kPadRepeat) |= start;
+        Mask(pad, kPadRepeatToo) |= start;
+    }
+}
+
+void ReadSettings() {
+    const std::wstring ini = g_dir + L"\\xiii-save-anywhere.ini";
+    g_enabled = GetPrivateProfileIntW(L"SaveAnywhere", L"Enabled", 1, ini.c_str()) != 0;
+    g_button = static_cast<int>(GetPrivateProfileIntW(L"SaveAnywhere", L"SaveButton", 4, ini.c_str()));
+    if (g_button < 0 || g_button > 15) g_button = 4;
+    wchar_t key[8]{};
+    GetPrivateProfileStringW(L"SaveAnywhere", L"SaveKey", L"E", key, 8, ini.c_str());
+    // one letter or digit, as printed on the key. Virtual key codes for those
+    // are their uppercase ASCII
+    const wchar_t k = static_cast<wchar_t>(std::towupper(key[0]));
+    g_saveKey = (k >= L'A' && k <= L'Z') || (k >= L'0' && k <= L'9') ? k : 'E';
+    g_prompt = GetPrivateProfileIntW(L"SaveAnywhere", L"Prompt", 1, ini.c_str()) != 0;
+    g_debug = GetPrivateProfileIntW(L"SaveAnywhere", L"Debug", 0, ini.c_str()) != 0;
+    const int glyph = GlyphFor(g_button);
+    if (glyph >= 0) std::snprintf(g_saveLabel, sizeof g_saveLabel, "\xF1%cSave", 0x40 + glyph);
+    else std::snprintf(g_saveLabel, sizeof g_saveLabel, "Save");
+}
+
+bool Matches(DWORD rva, const unsigned char* bytes, size_t size) {
+    return std::memcmp(reinterpret_cast<const void*>(g_base + rva), bytes, size) == 0;
+}
+
+bool Verify() {
+    g_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const wchar_t* name = std::wcsrchr(exe, L'\\');
+    if (!name || _wcsicmp(name + 1, L"ffxiiiimg.exe") != 0) {
+        Log("not XIII's exe, staying off");
+        return false;
+    }
+    struct Site {
+        DWORD rva;
+        const unsigned char* bytes;
+        size_t size;
+    };
+    const Site sites[] = {
+        {kPadUpdateRva, kPadUpdateHead, sizeof kPadUpdateHead},
+        {kGetStateRva, kGetStateHead, sizeof kGetStateHead},
+        {kZoneFireRva, kZoneFireHead, sizeof kZoneFireHead},
+        {kGetSavePointRva, kGetSavePointHead, sizeof kGetSavePointHead},
+        {kFindSavePointRowRva, kFindSavePointRowHead, sizeof kFindSavePointRowHead},
+        {kResolveActorRva, kResolveActorHead, sizeof kResolveActorHead},
+        {kLockRva, kLockHead, sizeof kLockHead},
+        {kUnlockRva, kUnlockHead, sizeof kUnlockHead},
+        {kSetPosFlashRva, kSetPosFlashHead, sizeof kSetPosFlashHead},
+        {kPlayerHandleRva, kPlayerHandleHead, sizeof kPlayerHandleHead},
+        {kZoneLoadRva, kMovEcxMem, sizeof kMovEcxMem},
+        {kPauseModeRva, kPauseModeHead, sizeof kPauseModeHead},
+        {kTextSetIdRva, kTextSetIdHead, sizeof kTextSetIdHead},
+        {kTextCtorRva, kTextCtorHead, sizeof kTextCtorHead},
+        {kTextDtorRva, kTextDtorHead, sizeof kTextDtorHead},
+        {kSaveWriteRva, kSaveWriteHead, sizeof kSaveWriteHead},
+        {kSaveReadRva, kSaveReadHead, sizeof kSaveReadHead},
+        {kMarkerLookupRva, kMarkerLookupHead, sizeof kMarkerLookupHead},
+        {kAreaEnterRva, kAreaEnterHead, sizeof kAreaEnterHead},
+        {kStartMarkerRva, kStartMarkerHead, sizeof kStartMarkerHead},
+        {kStoryRva, kStoryHead, sizeof kStoryHead},
+        {kEventFlagRva, kEventFlagHead, sizeof kEventFlagHead},
+        {kFieldUiRva, kFieldUiHead, sizeof kFieldUiHead},
+        {kMenuMaskRva, kMenuMaskHead, sizeof kMenuMaskHead},
+        {kMenuMaskBitsRva, kMenuMaskBitsHead, sizeof kMenuMaskBitsHead},
+        {kWorkRva, kWorkHead, sizeof kWorkHead},
+        {kZoneFlagRva, kZoneFlagHead, sizeof kZoneFlagHead},
+    };
+    // SteamStub decrypts the code before the game's entry point, and NovaFix
+    // loads us after that, but waiting on the bytes costs nothing if not
+    for (int tries = 0;; ++tries) {
+        bool all = true;
+        for (const Site& site : sites) all = all && Matches(site.rva, site.bytes, site.size);
+        if (all) break;
+        if (tries == 200) {
+            for (const Site& site : sites)
+                if (!Matches(site.rva, site.bytes, site.size)) Log("unexpected bytes at %#lx", site.rva);
+            Log("this isn't the Steam build this was made for, staying off");
+            return false;
+        }
+        Sleep(50);
+    }
+    g_getState = reinterpret_cast<GetStateFn>(g_base + kGetStateRva);
+    g_zoneFire = reinterpret_cast<ZoneFireFn>(g_base + kZoneFireRva);
+    g_getSavePoint = reinterpret_cast<GetSavePointFn>(g_base + kGetSavePointRva);
+    g_findSavePointRow = reinterpret_cast<FindSavePointRowFn>(g_base + kFindSavePointRowRva);
+    g_resolveActor = reinterpret_cast<ResolveActorFn>(g_base + kResolveActorRva);
+    g_lock = reinterpret_cast<LockFn>(g_base + kLockRva);
+    g_unlock = reinterpret_cast<UnlockFn>(g_base + kUnlockRva);
+    g_actorRegistry = reinterpret_cast<unsigned char**>(g_base + kActorRegistryRva);
+    g_setPosFlash = reinterpret_cast<SetPosFlashFn>(g_base + kSetPosFlashRva);
+    g_playerHandle = reinterpret_cast<PlayerHandleFn>(g_base + kPlayerHandleRva);
+    g_startMarker = reinterpret_cast<StartMarkerFn>(g_base + kStartMarkerRva);
+    g_fieldStart = reinterpret_cast<void**>(g_base + kFieldStartRva);
+    g_story = reinterpret_cast<StoryFn>(g_base + kStoryRva);
+    g_party = *reinterpret_cast<unsigned char***>(g_base + kStoryRva + 10);
+    g_menu = *reinterpret_cast<unsigned char***>(g_base + kMenuMaskRva + 1);
+    g_textCtor = reinterpret_cast<TextThisFn>(g_base + kTextCtorRva);
+    g_textDtor = reinterpret_cast<TextThisFn>(g_base + kTextDtorRva);
+    g_zoneSlot = *reinterpret_cast<void***>(g_base + kZoneLoadRva + 2);
+    return true;
+}
+
+bool Hook(LPVOID target, LPVOID detour, LPVOID* original) {
+    return MH_CreateHook(target, detour, original) == MH_OK && MH_EnableHook(target) == MH_OK;
+}
+
+// the log appends every session, so past 1 MB the old one steps aside as .1
+// (replacing the one before it) and this session starts a fresh file
+void RotateLog() {
+    const std::wstring log = g_dir + L"\\xiii-save-anywhere.log";
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (!GetFileAttributesExW(log.c_str(), GetFileExInfoStandard, &info)) return;
+    if (info.nFileSizeHigh == 0 && info.nFileSizeLow < 1024 * 1024) return;
+    MoveFileExW(log.c_str(), (log + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
+DWORD WINAPI Worker(LPVOID) {
+    RotateLog();
+    Log("xiii_save_anywhere 0.21, pid %lu", GetCurrentProcessId());
+    if (!Verify()) return 0;
+    ReadSettings();
+    Tidy();
+    LoadXInput();
+    if (MH_Initialize() != MH_OK ||
+        !Hook(reinterpret_cast<LPVOID>(g_base + kSaveWriteRva), reinterpret_cast<LPVOID>(&SaveWriteHook),
+              reinterpret_cast<LPVOID*>(&g_saveWrite)) ||
+        !Hook(reinterpret_cast<LPVOID>(g_base + kSaveReadRva), reinterpret_cast<LPVOID>(&SaveReadHook),
+              reinterpret_cast<LPVOID*>(&g_saveRead)) ||
+        !Hook(reinterpret_cast<LPVOID>(g_base + kMarkerLookupRva), reinterpret_cast<LPVOID>(&MarkerLookupHook),
+              reinterpret_cast<LPVOID*>(&g_markerLookup)) ||
+        !Hook(reinterpret_cast<LPVOID>(g_base + kAreaEnterRva), reinterpret_cast<LPVOID>(&AreaEnterHook),
+              reinterpret_cast<LPVOID*>(&g_areaEnter)) ||
+        !Hook(reinterpret_cast<LPVOID>(g_base + kPadUpdateRva), reinterpret_cast<LPVOID>(&PadUpdateHook),
+              reinterpret_cast<LPVOID*>(&g_padUpdate)) ||
+        !Hook(reinterpret_cast<LPVOID>(g_base + kPauseModeRva), reinterpret_cast<LPVOID>(&PauseModeHook),
+              reinterpret_cast<LPVOID*>(&g_pauseMode)) ||
+        !Hook(reinterpret_cast<LPVOID>(g_base + kTextSetIdRva), reinterpret_cast<LPVOID>(&TextSetIdHook),
+              reinterpret_cast<LPVOID*>(&g_textSetId))) {
+        // all or nothing: the input side without the save hooks would keep
+        // spots it can never match to a slot
+        MH_DisableHook(MH_ALL_HOOKS);
+        Log("couldn't hook the game, save anywhere is off this run");
+        return 0;
+    }
+    Log("ready, save is button %d or the %c key%s", g_button, g_saveKey, g_xinputGetState ? "" : " (no XInput)");
+    return 0;
+}
+
+const NovaFixPluginDescriptor kDescriptor = [] {
+    NovaFixPluginDescriptor d{};
+    d.structSize = sizeof d;
+    d.apiVersion = NOVAFIX_PLUGIN_ABI_VERSION;
+    d.id = "armyofone.xiii-save-anywhere";
+    d.name = "Save Anywhere";
+    d.author = "KarpTheMagikarp";
+    d.version = "0.21";
+    d.description = "Save from the field pause screen, and load back where you stood.";
+    return d;
+}();
+
+}  // namespace
+
+NOVAFIX_PLUGIN_EXPORT const NovaFixPluginDescriptor* NOVAFIX_PLUGIN_CALL
+NovaFixPlugin_Query(const NovaFixPluginHost*) {
+    return &kDescriptor;
+}
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+    if (reason != DLL_PROCESS_ATTACH) return TRUE;
+    DisableThreadLibraryCalls(module);
+    InitializeCriticalSection(&g_fileLock);
+    wchar_t path[MAX_PATH]{};
+    GetModuleFileNameW(module, path, MAX_PATH);
+    g_dir = path;
+    g_dir.resize(g_dir.find_last_of(L"\\/"));
+    DeleteFileW((g_dir + L"\\xiii-save-anywhere.log").c_str());
+    // never in the loader lock: MinHook suspends threads to patch
+    HANDLE thread = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+    if (thread) CloseHandle(thread);
+    return TRUE;
+}

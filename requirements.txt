@@ -1,0 +1,19 @@
+# the patching core (patcher/) is standard-library only, on purpose. these are
+# the only real third-party deps, and both of them are shell/UI concerns.
+
+# the desktop window. on windows this pulls pythonnet, which is what actually
+# hosts the Edge WebView2 control inside a WinForms window. see the collect_all
+# calls in ArmyOfOne.spec, PyInstaller cannot trace that by itself.
+# >=5.0.1 is not cosmetic. The host-side drop route that stamps
+# pywebviewFullPath onto a dropped file landed in 5.0, and without it the page
+# has no way to learn where a dropped file came from: File.path is an Electron
+# extension stock Chromium never had. <7 because 6.0 was a breaking release and
+# 7 is expected to drop the constants this still uses.
+pywebview>=5.0.1,<7
+
+# needed for the Nexus SSO login flow (patcher/mods/nexus_sso.py), which is
+# currently dormant behind a placeholder app id (see that file's docstring).
+# without it, or without a real app id, main.py's setup_hd_pack() falls back to
+# manual API key entry. listed here so the CI build has it available the moment
+# SSO gets switched on.
+websocket-client

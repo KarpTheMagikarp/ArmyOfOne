@@ -1,0 +1,30 @@
+// what NovaFix's add-on popup calls it. Without this it says the file name
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     0,21,0,0
+PRODUCTVERSION  0,21,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "FFXIII Trilogy Patcher"
+            VALUE "FileDescription",  "Save from the field pause screen in FFXIII"
+            VALUE "FileVersion",      "0.21.0.0"
+            VALUE "InternalName",     "xiii_save_anywhere"
+            VALUE "OriginalFilename", "xiii_save_anywhere.asi"
+            VALUE "ProductName",      "XIII Save Anywhere"
+            VALUE "ProductVersion",   "0.21.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

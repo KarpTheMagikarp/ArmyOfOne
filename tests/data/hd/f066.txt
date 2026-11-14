@@ -1,0 +1,14 @@
+42
+32
+fa
+0
+0
+0
+1
+chr\fa\f066\bin\f066.win32
+chr\fa\f066\bin\f066.win32.trb
+chr\fa\f066\bin\f066.win32.imgb
+-1
+:~,0,0,0,0,0.005,f066_Sphere.txt,Data\FFXIII_General_Models.bin
+:X
+:X

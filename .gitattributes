@@ -1,0 +1,27 @@
+# the repo is LF; git checks out CRLF on windows where it matters. without
+# this, files committed from windows and files committed from CI disagree and
+# every diff is the whole file.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.webm binary
+*.mp4 binary
+*.woff2 binary
+*.ico binary
+
+# bundled mod payloads have their sha256 pinned in the manifests, so git must
+# hand every platform the same bytes. a readme that used to ship beside the
+# XIII-2 audio fix was plain text, which "* text=auto" happily
+# normalised: it was pinned from a CRLF working tree and checks out LF, so the
+# hash missed and the patch reported "not the build this patcher ships" on
+# every machine that cloned after eol=lf landed. a pinned file cannot be a file
+# git is allowed to rewrite.
+assets/mods/** -text
+
+# same reasoning, different files. tests/data holds samples of other people's
+# formats: a real filelist index, and the HD Project's CRLF recipe files. A
+# fixture that git normalises stops being a sample of the thing it is there to
+# prove we can read, and the CRLF warning on checking these in was the audio
+# fix bug announcing itself a second time.
+tests/data/** -text
+

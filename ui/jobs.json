@@ -1,0 +1,221 @@
+{
+  "manifestVersion": 1,
+  "games": [
+    {
+      "id": "ff13",
+      "title": "Final Fantasy XIII",
+      "appid": "292120",
+      "folder": "FINAL FANTASY XIII",
+      "art": "../assets/art_xiii.png",
+      "cut": "../assets/cut_xiii.webm",
+      "cut720": "../assets/cut_xiii_720.webm",
+      "cutMp4": "../assets/cut_xiii.mp4",
+      "cutPoster": "../assets/cut_xiii_first.jpg",
+      "cutRest": "../assets/cut_xiii_last.jpg",
+      "artScale": 1.0,
+      "look": "xiii",
+      "jobs": [
+        {
+          "id": "ff13fix",
+          "name": "NovaFix",
+          "help": "Fixes the PC port's bugs and unlocks frame rate, VSync and graphics options.",
+          "kind": "required",
+          "why": "Unlocks framerate, fixes mouse and controller input."
+        },
+        {
+          "id": "dinput8shim",
+          "name": "4GB Compatibility",
+          "kind": "required",
+          "help": "Lets the 4GB Patch work without tripping the game's Steam check.",
+          "why": "Serves the DRM's self-check a clean copy so the patched exe still launches."
+        },
+        {
+          "id": "laa",
+          "name": "4GB Patch",
+          "kind": "required",
+          "help": "Lets the game use more memory, which prevents crashes in later chapters."
+        },
+        {
+          "id": "saveanywhere",
+          "name": "Save Anywhere",
+          "kind": "optional",
+          "default": false,
+          "help": "Pace yourself and save (mostly) anywhere from the pause menu.",
+          "info": "Save Anywhere: pause while you're out exploring and press Y (Triangle, or its key on keyboard) to open the normal save screen. Loading that save puts you back where you were standing instead of at the save station. It only works in free roam, never mid-event or mid-battle, the same rule the game uses for its own save request."
+        },
+        {
+          "id": "reshade",
+          "name": "Fabula-Lous Shader",
+          "kind": "optional",
+          "default": false,
+          "help": "ReShade Preset made by me! Highly recommended for sharper, more vivid visuals.",
+          "info": "Fabula-Lous Shader, a ReShade preset I made for this patcher: smoother edges, sharper detail, and a little more contrast and color. Press Home in game for ReShade's menu. To uninstall it, use Remove in Mods; unticking leaves it in."
+        },
+        {
+          "id": "hdproject",
+          "name": "FFXIII HD Project",
+          "help": "Overhauls textures across the entire game. Needs 35GB free to install, then uses about 6GB.",
+          "kind": "extra",
+          "page": "https://www.nexusmods.com/finalfantasy13/mods/17",
+          "get": "Press Download on the main file. It's picked up from there."
+        },
+        {
+          "id": "hdmodelsplus",
+          "name": "HD Models Plus",
+          "help": "Swaps the six playable characters' models for more detailed ones.",
+          "kind": "extra",
+          "page": "https://www.nexusmods.com/finalfantasy13/mods/11",
+          "get": "Press Download on the main file, then pick a version here. It's picked up from there."
+        },
+        {
+          "id": "hdfonts",
+          "name": "HD Fonts and GUI",
+          "help": "Redraws the fonts, menus, icons and map tiles at 4K.",
+          "kind": "extra",
+          "page": "https://www.nexusmods.com/finalfantasy13/mods/67?tab=files",
+          "get": "Download the Standalone Version. It's picked up from there."
+        }
+      ]
+    },
+    {
+      "id": "ff13-2",
+      "title": "Final Fantasy XIII-2",
+      "appid": "292140",
+      "folder": "FINAL FANTASY XIII-2",
+      "art": "../assets/art_xiii2.png",
+      "cut": "../assets/cut_xiii2.webm",
+      "cut720": "../assets/cut_xiii2_720.webm",
+      "cutMp4": "../assets/cut_xiii2.mp4",
+      "cutPoster": "../assets/cut_xiii2_first.jpg",
+      "cutRest": "../assets/cut_xiii2_last.jpg",
+      "artScale": 1.0,
+      "look": "xiii2",
+      "jobs": [
+        {
+          "id": "ff132fix",
+          "name": "NovaFix",
+          "help": "Fixes the PC port's bugs and unlocks frame rate, VSync and graphics options.",
+          "kind": "required",
+          "why": "Unlocks framerate, fixes mouse and controller input."
+        },
+        {
+          "id": "laa",
+          "name": "4GB Patch",
+          "help": "Lets the game use more memory, which prevents crashes.",
+          "kind": "required",
+          "why": "Flags the exe large address aware so it stops running out of memory."
+        },
+        {
+          "id": "audio",
+          "name": "Audio Fix",
+          "help": "Fixes muffled voices and sound effects, clipping, and the buzz on 7.1 setups.",
+          "kind": "optional",
+          "why": "Replaces the broken audio filter and stereo downmix, and silences the 7.1 buzz.",
+          "default": true,
+          "info": "Audio Fix, made for this patcher: voices and sound effects without the game's accidental muffle, stereo and headphones without clipping, and no more buzz on 7.1. Cutscene videos still play in stereo. Each fix can be switched off in xiii2-audio.ini, in the game's addons folder."
+        },
+        {
+          "id": "reshade",
+          "name": "Fabula-Lous Shader",
+          "kind": "optional",
+          "default": false,
+          "help": "ReShade Preset made by me! Highly recommended for sharper, more vivid visuals.",
+          "info": "Fabula-Lous Shader, a ReShade preset I made for this patcher, tuned for XIII-2: smoother edges, sharper detail, more color, and the haze lifted off sunlit places. Press Home in game for ReShade's menu. To uninstall it, use Remove in Mods; unticking leaves it in."
+        },
+        {
+          "id": "dlcrestore",
+          "name": "DLC Restoration",
+          "help": "Brings back the outfits, weapons and accessories cut from the Steam release.",
+          "kind": "extra",
+          "page": "https://community.pcgamingwiki.com/files/file/2871-final-fantasy-xiii-2-console-content-patch-v23/",
+          "get": "Press Download on the page. It's picked up from there."
+        },
+        {
+          "id": "hdproject2",
+          "name": "FFXIII-2 HD",
+          "help": "Overhauls textures and character models across the game. Needs about 20GB free to install.",
+          "kind": "extra",
+          "page": "https://www.nexusmods.com/finalfantasyxiii2/mods/1",
+          "get": "Press Download on the main file. It's picked up from there."
+        },
+        {
+          "id": "hdfonts",
+          "name": "HD Fonts and GUI",
+          "help": "Redraws the fonts, menus, icons and map tiles at 4K, and fixes shadow transparency, rain and depth of field.",
+          "kind": "extra",
+          "page": "https://www.nexusmods.com/finalfantasyxiii2/mods/40?tab=files",
+          "get": "Download the Standalone Version. It's picked up from there."
+        }
+      ]
+    },
+    {
+      "id": "lr",
+      "title": "Lightning Returns: FFXIII",
+      "appid": "345350",
+      "folder": "LIGHTNING RETURNS FINAL FANTASY XIII",
+      "art": "../assets/art_lr.png",
+      "cut": "../assets/cut_lr.webm",
+      "cut720": "../assets/cut_lr_720.webm",
+      "cutMp4": "../assets/cut_lr.mp4",
+      "cutPoster": "../assets/cut_lr_first.jpg",
+      "cutRest": "../assets/cut_lr_last.jpg",
+      "artScale": 1.0,
+      "look": "xiii2",
+      "jobs": [
+        {
+          "id": "lrfix",
+          "name": "NovaFix",
+          "help": "Fixes the PC port's bugs and unlocks frame rate, VSync and graphics options.",
+          "kind": "required",
+          "why": "Takes the renderer off its hardcoded VSync cap and fixes the port's input handling."
+        },
+        {
+          "id": "laa",
+          "name": "4GB Patch",
+          "kind": "required",
+          "help": "Lets the game use more memory, which prevents crashes before you reach gameplay.",
+          "why": "LRFF13.exe is 32-bit, so without this it can only ever address 2GB."
+        },
+        {
+          "id": "lrmouse",
+          "name": "Mouse Support",
+          "kind": "required",
+          "help": "The long awaited mouse support for Lightning Returns... Enjoy!",
+          "why": "The PC port shipped with no mouse support at all, so this adds it straight into the game's own input code."
+        },
+        {
+          "id": "reshade",
+          "name": "Fabula-Lous Shader",
+          "kind": "optional",
+          "default": false,
+          "help": "ReShade Preset made by me! Highly recommended for sharper, more vivid visuals.",
+          "info": "Fabula-Lous Shader, a ReShade preset I made for this patcher: smoother edges, sharper detail, and a little more contrast and color. Press Home in game for ReShade's menu. To uninstall it, use Remove in Mods; unticking leaves it in."
+        },
+        {
+          "id": "saviors",
+          "name": "Savior's Patch",
+          "help": "Cuts the stutter when the game loads new areas. You can tune it in Settings once it's in.",
+          "kind": "extra",
+          "page": "https://www.nexusmods.com/lightningreturnsfinalfantasy13/mods/36?tab=files",
+          "get": "Press Download on the main file. It's picked up from there."
+        },
+        {
+          "id": "dlcrestore",
+          "name": "DLC Restoration",
+          "help": "Adds Aerith's garb, and unlocks the Siegfried garb and Outerworld adornments the Steam version leaves locked.",
+          "kind": "extra",
+          "page": "https://www.nexusmods.com/lightningreturnsfinalfantasy13/mods/23",
+          "get": "Download both main files. They're picked up from there."
+        },
+        {
+          "id": "hdfonts",
+          "name": "HD Fonts and GUI",
+          "help": "Redraws the fonts, menus and map tiles at 4K.",
+          "kind": "extra",
+          "page": "https://www.nexusmods.com/lightningreturnsfinalfantasy13/mods/33?tab=files",
+          "get": "Download the Manual Install. It's picked up from there."
+        }
+      ]
+    }
+  ]
+}

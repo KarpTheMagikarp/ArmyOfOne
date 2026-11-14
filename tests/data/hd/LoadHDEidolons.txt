@@ -1,0 +1,23 @@
+#:Eidolons
+s s101
+s s102
+s s150
+s s201
+s s202
+s s203
+s s250
+s s301
+s s302
+s s350
+s s401
+s s402
+s s403
+s s410
+s s501
+s s502
+s s503
+s s504
+s s510
+s s550
+s s601
+s s650

@@ -1,0 +1,30 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# build output. the exe ships via GitHub Releases, never from git.
+build/
+dist/
+*.zip
+
+# generated at build time by tools/build_ui_manifest.py
+assets/manifest.json
+
+# runtime state, written next to the exe. never source.
+.state/
+*.backup
+*.log
+nexus_config.json
+downloads/
+
+# screenshots from tools/shoot_hd_options.py
+hd-*.png
+
+# tools/fxcheck/build.sh's ReShade checkout and what it builds from it
+tools/fxcheck/.reshade/
+tools/fxcheck/fxcheck
+tools/fxcheck/fxcheck.exe
+
+# tools/relines.py keeps the untouched cuts here, so a rerun starts clean.
+# outside assets/ on purpose: the spec bundles everything in there
+.cut-originals/

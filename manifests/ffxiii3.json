@@ -1,0 +1,230 @@
+{
+  "game_id": "ffxiii3",
+  "display_name": "Lightning Returns: Final Fantasy XIII",
+  "manifest_version": "v1.0.0",
+  "steam_app_id": "345350",
+  "ui_id": "lr",
+  "executable_relative_path": "LRFF13.exe",
+  "patches": [
+    {
+      "id": "flip_laa_flag",
+      "label": "4GB Patch",
+      "type": "binary_patch",
+      "operation": "flip_laa_flag",
+      "requires_backup": false,
+      "default_enabled": true,
+      "ui_job_id": "laa",
+      "build_guard": "lr_laa",
+      "player_note": "Lets the game use more memory, which prevents out-of-memory crashes in long sessions.",
+      "notes": "LRFF13.exe is 32-bit: NovaFix's lightning_returns title adapter fingerprints it as IMAGE_FILE_MACHINE_I386 with a PE32 optional header. A 32-bit process is capped at 2GB of user address space without this flag, whatever the machine has.\\n\\nLR needs this more than the other two do. NovaFix's readme says that without the 4GB patch the game 'is likely to CRASH before even reaching gameplay'.\\n\\nand unlike XIII, editing the executable is fine here. NovaFix's build catalogs name the DRM where it exists: XIII's builds are labelled 'Steam 2014 (original CEG executable)' and XIII-2's 'Steam 2014 CEG layout (modified executable)'. LR's single build is 'Steam 2021 executable' with no CEG anywhere in it, and the adapter still carries a 'Steam 2021 layout (modified executable)' variant, so a modified LRFF13.exe is a state NovaFix expects to see. The readme's warning that other 4GB patches 'trigger Steam DRM' is about the 2014 titles, which is also where FF13Fix and untouched.exe come in.\\n\\nlr_laa_guard still checks the image is 32-bit and still defers to the launch check, because an executable nobody has a hash for is not one to be confident about, and that check costs nothing when it passes.\\n\\nno backup, for XIII-2's reason. clear_laa_flag is an exact inverse of flip_laa_flag and this bit is the only byte we touch, so there is nothing a copy of the executable would restore that clearing the flag does not. XIII is the exception and keeps untouched.exe because the shim SERVES that file to the DRM, which is a second job a backup happens to do there.\\n\\nan LAA-only edit does not move .text or SizeOfImage, so NovaFix's fingerprint still matches and the proxy loads normally. same reasoning as ffxiii2.json.\\n\\nthis is a stability patch, not a performance one. the stutter is what Savior's Patch is for, which is Worth getting now."
+    },
+    {
+      "id": "install_novafix",
+      "label": "NovaFix",
+      "type": "bundled_install",
+      "bundled_files": [
+        {
+          "source": "assets/mods/novafix/d3d9.dll",
+          "target": "d3d9.dll",
+          "sha256": "1e2c96f2101f81bf7d6097e9725c508b127cd143aeb07decbcdda56291b6a458"
+        }
+      ],
+      "default_enabled": true,
+      "requires_backup": false,
+      "credit": "NovaFix by Kartin8 (GPL-3.0)",
+      "player_note": "Fixes the PC port's bugs and unlocks frame rate, VSync and graphics options.",
+      "install_relative_path": ".",
+      "ui_job_id": "lrfix",
+      "notes": "replaces our DXVK install. NovaFix IS the d3d9.dll now, so DXVK cannot sit in that slot as well. their readme's route for DXVK on Windows is to place the 32-bit d3d9.dll next to the proxy as dxvk.dll and set D3D9Backend=LocalDXVK, which is a NovaFix setting rather than a separate patch, and the Settings drawer already offers it.\\n\\nworth being precise about what this does for LR, because it is much less than it does for the other two. presentation_setup.cpp forces D3DPRESENT_INTERVAL_IMMEDIATE for LR and returns early, so the forced VSync cap goes and nothing else in that block runs. bootstrap.cpp calls SetPerformancePresentationControlsEnabled(title != LightningReturns), so frame rate limit, refresh rate and triple buffering are not just unset for LR, they are unreadable. LR has no [Graphics] section at all. novafix_config.TITLE_SCOPED already matches this."
+    },
+    {
+      "id": "install_lr_mouse",
+      "label": "Mouse Support",
+      "type": "bundled_install",
+      "install_relative_path": "addons/lr-mouse",
+      "bundled_files": [
+        {
+          "source": "assets/mods/lr-mouse/lr_mouse.asi",
+          "target": "lr_mouse.asi",
+          "sha256": "a980d3f92db3915238683f7da1867996174c7d92038c1c2274fb239a09102bc0"
+        },
+        {
+          "source": "assets/mods/lr-mouse/lr-mouse.ini",
+          "target": "lr-mouse.ini",
+          "config": true,
+          "sha256": "4a395726253b8db2efbf915d0692d5ba04f7f1a03682fbcec6f350a02a28709f"
+        },
+        {
+          "source": "assets/mods/lr-mouse/LICENSE-MinHook.txt",
+          "target": "LICENSE-MinHook.txt",
+          "sha256": "d5c2224982b0b95a16b098a561335fa93f3eaf4d0aa964b7843edb986df78dc8"
+        }
+      ],
+      "requires": [
+        "install_novafix"
+      ],
+      "default_enabled": true,
+      "requires_backup": false,
+      "ui_job_id": "lrmouse",
+      "credit": "made for this patcher, with MinHook by Tsuda Kageyu (BSD 2-Clause)",
+      "player_note": "Mouse turns the camera, left click strikes and right click jumps while you're exploring.",
+      "notes": "a NovaFix add-on (addon-src/lr-mouse, tools/build_lr_mouse.sh), so it goes in after NovaFix and lands in whichever add-on folder NovaFix is actually reading. it hooks the pad update (clicks go in through pad+0xE8, the game's one-frame extra held mask), the field's camera input handler and PlayerObjectController's update (together they say Lightning's yours to move), and PeekMessageA (the cursor hide has to run on the window thread). menus are read, not hooked: the GUI manager's input gate (+0xBC) and top window (+0x4D0) say a menu has the pad, and the wheel and clicks go in through the same +0xE8 mask. camera movement is added to pad 0's right stick, which is what the controller reads.\n\nlr-mouse.ini is config: the player's once they change it, picked up live by the add-on. a missing one means defaults.\n\nonly the Steam LRFF13.exe. each hook site's bytes are checked first, and anything else gets a line in lr-mouse.log and an add-on that does nothing."
+    },
+    {
+      "id": "install_saviors_patch",
+      "label": "Savior's Patch",
+      "type": "nexus",
+      "nexus_game_domain": "lightningreturnsfinalfantasy13",
+      "nexus_mod_id": "36",
+      "install_relative_path": ".",
+      "default_enabled": false,
+      "ui_job_id": "saviors",
+      "in_mods": true,
+      "expects": [
+        "dinput8.dll"
+      ],
+      "credit": "Savior's Patch by dendonflo (GPL-3.0)",
+      "player_note": "Cuts the stutter when the game loads new areas. Its settings show up in Settings once it's in.",
+      "notes": "Worth getting, not Apply: it doesn't ship with the patcher any more. The page's download goes in through the Mods drawer like any loader mod, a dinput8.dll beside LRFF13.exe, and bridge.loader_mods() ties it back to this row by its name and that dll, which is all expects is for.\n\nin_mods is for what an earlier version's Apply put in: the record names the dll, so it's listed under Installed and Remove takes it off, its SaviorsPatch.log with it (RUNTIME_LOGS).\n\nit's still the answer to 'LR stutters', and the 4GB patch is not: asset streaming and the frame pacer are what it reworks, which FF13Fix issue #45 and DSOGaming's 40-50% GPU use during the hitches both point at.\n\ndinput8.dll, so it doesn't fight NovaFix for d3d9.dll. its settings live in SaviorsPatch.ini, which the Settings drawer writes once the dll beside the exe is this one (novafix_config.owner_in). the rows are SAVIORS_SETTINGS, read off g_toggles and g_numerics in the mod's 08_config_persist.c. ambient occlusion is left out on purpose (28 keys, a look rather than a fix) and so is VSync, which NovaFix forces immediate for LR at device creation and reset, and NovaFix touches the present parameters last."
+    },
+    {
+      "id": "restore_outerworld_addons",
+      "label": "DLC Restoration",
+      "type": "nexus",
+      "nexus_game_domain": "lightningreturnsfinalfantasy13",
+      "nexus_mod_id": "23",
+      "install_relative_path": ".",
+      "default_enabled": false,
+      "ui_job_id": "dlcrestore",
+      "in_mods": true,
+      "notes": "Nexus mod 23, 'Aerith Garb and Outerworld Addons v1.1 Complete Update' by Krisan Thyme, uploaded by Eredine. supersedes mod 4, which was the same author's earlier Siegfried and Outerworld package.\n\nrecommended rather than required: it restores content, it does not fix anything, and a game missing it runs perfectly well. so it is listed under the Mods drawer's Worth getting rather than in Apply's list.\n\nits page has two main files, Aerith Garb Restauration and Outerworld Addons, each Surihix's patcher: a .NET exe that swaps records in db/resident/wdbpack.bin inside one voice set's white_img2, and for Aerith copies DLC files into weiss_data/dlc/0000003. The Mods drawer reads their PatchData.bin instead of running them (patcher/mods/patchdata.py), in both voice sets, and gets byte for byte what the exe writes, checked against the exe itself under mono. recipes is the two patchers by name: Open page watches Downloads for two files, by the mod id Nexus puts in every download's name, and the row is in once both are. download_sizes are v1.1's, for the download's percentage.\n\nThis entry is still what the command line's Apply does with a supplied file, which expects= keeps from unpacking a patcher into the game root. in_mods lists one an earlier Apply put in under Installed too, with a Remove that is this patch's revert.",
+      "expects": [
+        "*.imgb",
+        "*.trb",
+        "*.win32.bin"
+      ],
+      "player_note": "Unlocks the Siegfried garb and the Outerworld adornments, which the Steam release leaves unreachable, and adds Krisan Thyme's Aerith outfit.",
+      "recipes": [
+        "LRAerithGrabRestoration.exe",
+        "LROuterworldAddons.exe"
+      ],
+      "download_sizes": {
+        "Aerith_Garb_Restauration-23-1-1-1759690588.zip": 21293472,
+        "FFXIII-LR_-_Outerworld_Addons-23-1-1-1759689437.zip": 68648
+      }
+    },
+    {
+      "id": "install_reshade",
+      "label": "Fabula-Lous Shader",
+      "type": "bundled_install",
+      "install_relative_path": ".",
+      "bundled_files": [
+        {
+          "source": "assets/mods/reshade/d3d9.dll",
+          "target": "ReShade/d3d9.dll",
+          "sha256": "538998f66c0197adcdeadfe8e5ea19dd6ca3253e40399476d291f385ce518b88",
+          "foreign": "refuse"
+        },
+        {
+          "source": "assets/mods/reshade/ReShade.ini",
+          "target": "ReShade/ReShade.ini",
+          "sha256": "7cb0a557daf56c6a79dfe3a090ec5e88d2a73cfc96dda4be8fc11aa31ce25f9a",
+          "config": true
+        },
+        {
+          "source": "assets/mods/reshade/Fabula-Lous Shader LR.ini",
+          "target": "ReShade/Fabula-Lous Shader.ini",
+          "sha256": "f90077b2e5faed58a1e5fd8eab2b4093e9b2275eb3cad40ec99ea201394adf26",
+          "config": true,
+          "was": [
+            "ReShade/Crystarium.ini"
+          ]
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/ReShade.fxh",
+          "target": "ReShade/reshade-shaders/Shaders/ReShade.fxh",
+          "sha256": "6dabfbbaf968c3871905d2ea17f96572ff7b1cec01310b5d0e5252b66b30174f"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/ReShadeUI.fxh",
+          "target": "ReShade/reshade-shaders/Shaders/ReShadeUI.fxh",
+          "sha256": "78adf672df47460297eb9fe6dd238d2aafa24510b52b84feb1a745dff70eb901"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/SMAA.fx",
+          "target": "ReShade/reshade-shaders/Shaders/SMAA.fx",
+          "sha256": "fd6591eeb70ff584ac4d774ed3c79af5efac34f5de1a36f8f873e959259c0007"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/SMAA.fxh",
+          "target": "ReShade/reshade-shaders/Shaders/SMAA.fxh",
+          "sha256": "ee18b0f376585338cdb477a0900757cebac86d3c476ef99955348b55818c8310"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/LumaSharpen.fx",
+          "target": "ReShade/reshade-shaders/Shaders/LumaSharpen.fx",
+          "sha256": "7b358ebbdaa7bc4c44ebf6e9d41afcb3f21ee3dde5c5f85bf40201d5c6044680"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/Curves.fx",
+          "target": "ReShade/reshade-shaders/Shaders/Curves.fx",
+          "sha256": "8368029d2254856505abf7dd789342024465403da49434dd776c6d1af4079a98"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/Vibrance.fx",
+          "target": "ReShade/reshade-shaders/Shaders/Vibrance.fx",
+          "sha256": "b9189a28ca4a645a0e188f8396c81889d217e3c706e8900dfe6594d43e7c33eb"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/FabulaLous.fx",
+          "target": "ReShade/reshade-shaders/Shaders/FabulaLous.fx",
+          "sha256": "1e75fea4372cc72551510cbf333edcb2c5adb3fff21b88f3a945a0b2fcc7681a"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Textures/AreaTex.png",
+          "target": "ReShade/reshade-shaders/Textures/AreaTex.png",
+          "sha256": "0044e6b420a8d98a9dc6a60bedbd43f75cd15ac6052fdedfb2f2f55d3077beed"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Textures/SearchTex.png",
+          "target": "ReShade/reshade-shaders/Textures/SearchTex.png",
+          "sha256": "55a97853ab64174245701accf315ab63d41776c9cb2aa14c675e653684fd96f3"
+        },
+        {
+          "source": "assets/mods/reshade/LICENSE-ReShade.md",
+          "target": "ReShade/LICENSE-ReShade.md",
+          "sha256": "237ded5b8344f820113efab1e65e91e1f159d9202c5b4856606a0590d3ffdab0"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/LICENSE-SweetFX.txt",
+          "target": "ReShade/reshade-shaders/LICENSE-SweetFX.txt",
+          "sha256": "9b2e0b3ff53493f211e39390947716cd16ee559303dac0713ad4b12228dbce51"
+        }
+      ],
+      "default_enabled": false,
+      "requires": [
+        "install_novafix"
+      ],
+      "ui_job_id": "reshade",
+      "in_mods": true,
+      "credit": "ReShade by crosire (BSD 3-Clause), SMAA, LumaSharpen, Curves and Vibrance from CeeJay.dk's SweetFX (MIT), the Fabula-Lous Shader preset and its grade by Cody Le",
+      "player_note": "Fabula-Lous Shader, a ReShade preset I made for this patcher: smoother edges, sharper detail, and a little more contrast and color. Press Home in game to open ReShade's menu.",
+      "notes": "the same ReShade 6.8, Fabula-Lous Shader preset and shaders as XIII's, file for file and pin for pin. ffxiii.json says where each comes from and why the two settings files are config.\n\nLR's NovaFix sits in the game's root beside LRFF13.exe, so the ReShade folder does too. NovaFix turns LR's presentation controls off, but D3D9Backend isn't one of them: performance_settings.cpp reads it for every title, so Automatic takes ReShade\\d3d9.dll here the same as in the other two.\n\nHome is ReShade's menu key here as on the other two, and the text box NovaFix restores for renaming schemata, map markers and the White Chocobo takes Home as the start of the line. ReShade hears it first, so Home while typing a name opens its menu as well, and Home again shuts it. Left that way: one key across all three games beats a different one for a single screen."
+    },
+    {
+      "id": "hd_fonts_gui",
+      "label": "HD Fonts and GUI",
+      "type": "nexus",
+      "nexus_game_domain": "lightningreturnsfinalfantasy13",
+      "nexus_mod_id": "33",
+      "install_relative_path": ".",
+      "default_enabled": false,
+      "ui_job_id": "hdfonts",
+      "expects": [
+        "version.dll"
+      ],
+      "notes": "HD Fonts and GUI by dendonflo, nexusmods.com/lightningreturnsfinalfantasy13/mods/33. A version.dll and the weiss_data folder it reads from. Its page says to copy them into white_data\\prog\\win\\bin, which is XIII's folder, lifted from the XIII and XIII-2 pages: LR has no such folder, and LRFF13.exe, which loads a version.dll beside it, is in the game's root, which is where this goes and where its HDTextures.log lands. Its permissions forbid re-uploading it, so it's recommended, not bundled.\n\nOpen page watches Downloads and what lands goes in like a drop, as a mod that loads itself, its weiss_data folder beside the dll inside the game's own, with Remove under Installed. Its page's other main file is the Nova package, so the row asks for the Manual Install, and knows it's in by its record's name with version.dll beside the exe (bridge.loader_mods). Its download couldn't be fetched to check without a Nexus login, so its first drop is the check.",
+      "player_note": "Redraws the fonts, menus and map tiles at 4K. Open the page, download the Manual Install, and the patcher installs it."
+    }
+  ]
+}

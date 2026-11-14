@@ -1,0 +1,334 @@
+{
+  "game_id": "ffxiii",
+  "display_name": "Final Fantasy XIII",
+  "manifest_version": "v1.0.0",
+  "steam_app_id": "292120",
+  "ui_id": "ff13",
+  "executable_relative_path": "white_data/prog/win/bin/ffxiiiimg.exe",
+  "patches": [
+    {
+      "id": "install_novafix",
+      "label": "NovaFix",
+      "type": "bundled_install",
+      "bundled_files": [
+        {
+          "source": "assets/mods/novafix/d3d9.dll",
+          "target": "d3d9.dll",
+          "sha256": "1e2c96f2101f81bf7d6097e9725c508b127cd143aeb07decbcdda56291b6a458"
+        }
+      ],
+      "default_enabled": true,
+      "requires_backup": false,
+      "credit": "NovaFix by Kartin8 (GPL-3.0)",
+      "player_note": "Fixes the PC port's bugs and unlocks frame rate, VSync and graphics options.",
+      "install_relative_path": "white_data/prog/win/bin",
+      "ui_job_id": "ff13fix",
+      "replaces": [
+        "install_ff13fix"
+      ],
+      "notes": "bundled with Kartin8's permission and pinned by sha256 (tools/pin_bundled.py repins). replaces FF13Fix, which NovaFix is incompatible with: it scans for FF13Fix and quietly disables its own overlapping features, so replaces= takes our FF13Fix install off first. it has no 4GB patch or exe redirect of its own; install_dinput8_shim covers that on XIII."
+    },
+    {
+      "id": "install_exe_redirect",
+      "label": "4GB compatibility",
+      "type": "bundled_install",
+      "install_relative_path": "white_data/prog/win/bin/addons/ff13-exe-redirect",
+      "bundled_files": [
+        {
+          "source": "assets/mods/ff13-exe-redirect/00_ff13_exe_redirect.asi",
+          "target": "00_ff13_exe_redirect.asi",
+          "sha256": "8559cb63cfb41b245751a88ae62e2c198f3de43e9dd330f4f309e3681b2834dc"
+        }
+      ],
+      "requires": [
+        "install_novafix"
+      ],
+      "default_enabled": false,
+      "requires_backup": false,
+      "credit": "technique from rebtd7's FF13Fix",
+      "player_note": "Lets the 4GB Patch work without tripping the game's Steam check.",
+      "notes": "not installed. kept so the engine knows where an old install's files are and can remove them. it hooked CreateFileA/W so CEG read untouched.exe (FF13Fix's trick), but NovaFix loads add-ons at render init and the check runs in the entry point, so it never got the chance. install_dinput8_shim replaced it. see docs/4gb-patch.md."
+    },
+    {
+      "id": "install_dinput8_shim",
+      "label": "4GB Compatibility",
+      "type": "bundled_install",
+      "install_relative_path": "white_data/prog/win/bin",
+      "bundled_files": [
+        {
+          "source": "assets/mods/ff13-dinput8-shim/dinput8.dll",
+          "target": "dinput8.dll",
+          "sha256": "fa4c5cc110eaa3d792b4f98095cd59ae4e8c03a07c18caeda9b814efadbdb471"
+        }
+      ],
+      "default_enabled": true,
+      "requires_backup": false,
+      "credit": "technique from rebtd7's FF13Fix",
+      "ui_job_id": "dinput8shim",
+      "player_note": "Lets the 4GB Patch work without tripping the game's Steam check.",
+      "notes": "a dinput8.dll proxy beside the exe. ffxiiiimg.exe imports dinput8 statically, so the loader runs its DllMain before the entry point, where the CEG check is. it does both halves of FF13Fix: CreateFileA/W serves untouched.exe to the check, and the running image's Characteristics and CheckSum get untouched.exe's values (image_guard.h computes the offsets off e_lfanew). imports kernel32 only, asserted by tools/build_shim.sh, since a static import that fails to load is a game that doesn't start. logs to ff13-dinput8-shim.log beside the game. see docs/4gb-patch.md.",
+      "replaces": [
+        "install_exe_redirect"
+      ],
+      "build_guard": "ff13_shim"
+    },
+    {
+      "id": "hd_texture_pack",
+      "label": "HD Texture Pack",
+      "type": "nexus",
+      "install_relative_path": "white_data/prog/win",
+      "estimated_size_gb": 6.0,
+      "requires_backup": false,
+      "default_enabled": false,
+      "ui_job_id": "hdproject",
+      "notes": "The FF XIII HD Project, nexusmods.com/finalfantasy13/mods/17. Its .bat is replaced rather than run: patcher/mods/hd_install.py drives the three tools it ships, after a verified backup of every archive it touches, and Revert puts that backup back. Offered in the Mods drawer from a dropped folder rather than through Apply, because the 6GB download is still the user's to fetch.",
+      "nexus_game_domain": "finalfantasy13",
+      "nexus_mod_id": "17",
+      "runs_installer": true,
+      "expects": [
+        "*.imgb",
+        "*.trb"
+      ],
+      "categories": [
+        {
+          "id": "zones",
+          "label": "Environmental Zones",
+          "list": "LoadHDEnvironments.txt",
+          "menu": "A",
+          "default": false,
+          "supported": true,
+          "warn": "The 20 explorable areas. Longest job here."
+        },
+        {
+          "id": "weapons",
+          "label": "Weapons",
+          "list": "LoadHDWeapons.txt",
+          "menu": "B",
+          "default": true,
+          "supported": true,
+          "warn": "Every weapon model."
+        },
+        {
+          "id": "eidolons",
+          "label": "Eidolons",
+          "list": "LoadHDEidolons.txt",
+          "menu": "C",
+          "default": true,
+          "supported": true,
+          "warn": "The summons."
+        },
+        {
+          "id": "npcs",
+          "label": "NPCs",
+          "list": "LoadHDNPCs.txt",
+          "menu": "D",
+          "default": true,
+          "supported": true,
+          "warn": "Unplayable characters you see in the overworld."
+        },
+        {
+          "id": "enemies",
+          "label": "Enemies",
+          "list": "LoadHDEnemy.txt",
+          "menu": "E",
+          "default": true,
+          "supported": true,
+          "warn": "Monsters and bosses."
+        },
+        {
+          "id": "misc",
+          "label": "Miscellaneous",
+          "list": "LoadHDOther.txt",
+          "menu": "F",
+          "default": true,
+          "supported": true,
+          "warn": "Props, vehicles and scenery."
+        },
+        {
+          "id": "pcs",
+          "label": "Playable Characters",
+          "list": "LoadHDPCs.tx1",
+          "menu": "G",
+          "default": false,
+          "mesh": true,
+          "warn": "The six playable characters. Ones from the Mods drawer, like HD Models Plus, stay.",
+          "supported": true
+        }
+      ]
+    },
+    {
+      "id": "hd_models_plus",
+      "label": "HD Models Plus",
+      "type": "nexus",
+      "nexus_game_domain": "finalfantasy13",
+      "nexus_mod_id": "11",
+      "runs_installer": true,
+      "estimated_size_gb": 0.08,
+      "default_enabled": false,
+      "ui_job_id": "hdmodelsplus",
+      "notes": "HD Models Plus, nexusmods.com/finalfantasy13/mods/11, main file 4.1.7 (an 83 MB zip). Its .bat is menus around one model tool, so it's the Mods drawer that builds and puts it in (patcher/mods/models_plus.py), never this entry: Worth getting's Open page watches Downloads for it and what lands goes in like a drop, a version picked first.\n\nruns_installer is what keeps the command line's Apply to staging a download it's handed, never unpacking it into the game the way a drop-in mod's goes. The size is what the download watch's floor is a tenth of, so a page's worth of something else landing meanwhile isn't taken for it.\n\nThe drawer records it under this label, which is how its Worth getting row knows it's in (bridge.file_mods).",
+      "player_note": "More detailed models for the six playable characters. Open the page, press Download and pick a version: the patcher builds it with the mod's own tool and puts it in from the Mods drawer."
+    },
+    {
+      "id": "flip_laa_flag",
+      "label": "4GB Patch",
+      "type": "binary_patch",
+      "operation": "flip_laa_flag",
+      "target_relative_path": "white_data/prog/win/bin/ffxiiiimg.exe",
+      "requires_backup": true,
+      "default_enabled": true,
+      "ui_job_id": "laa",
+      "player_note": "Lets the game use more memory, which prevents crashes in later chapters.",
+      "notes": "XIII's Steam exe is CEG protected and reads itself to validate, so a patched exe needs a cover in front of the check or Steam refuses it (Application load error 3:0000065432). ff13_laa_guard allows it under the dinput8 shim, a proxy that says it redirects exe reads, or the CEG-free community exe, and repairs an install a patch already broke. a refused launch is recorded per cover and keeps it off. only needed past plain 1080p (HD textures, 4K, DXVK, ReShade). see docs/4gb-patch.md.",
+      "required_backup_filename": "untouched.exe",
+      "build_guard": "ff13_laa"
+    },
+    {
+      "id": "install_save_anywhere",
+      "label": "Save Anywhere",
+      "type": "bundled_install",
+      "install_relative_path": "white_data/prog/win/bin/addons/xiii-save-anywhere",
+      "bundled_files": [
+        {
+          "source": "assets/mods/xiii-save-anywhere/xiii_save_anywhere.asi",
+          "target": "xiii_save_anywhere.asi",
+          "sha256": "d525e97b17377777b230211f460b8931fa858539fb79f1978f37e3b1f1c195ef"
+        },
+        {
+          "source": "assets/mods/xiii-save-anywhere/xiii-save-anywhere.ini",
+          "target": "xiii-save-anywhere.ini",
+          "config": true,
+          "sha256": "7cad6c41cbf2364fb699979954761451934faf2d983f30a16ce00354cfc870d8"
+        },
+        {
+          "source": "assets/mods/xiii-save-anywhere/LICENSE-MinHook.txt",
+          "target": "LICENSE-MinHook.txt",
+          "sha256": "d5c2224982b0b95a16b098a561335fa93f3eaf4d0aa964b7843edb986df78dc8"
+        }
+      ],
+      "requires": [
+        "install_novafix"
+      ],
+      "default_enabled": false,
+      "requires_backup": false,
+      "build_guard": "xiii_save_anywhere",
+      "ui_job_id": "saveanywhere",
+      "credit": "made for this patcher, with MinHook by Tsuda Kageyu (BSD 2-Clause)",
+      "player_note": "Pause while exploring and press Y (or its key) to save through the game's own save screen. Loading it puts you back where you stood.",
+      "notes": "a NovaFix add-on (addon-src/xiii-save-anywhere, tools/build_xiii_save_anywhere.sh). Y on the field pause screen resumes and fires the game's own TRG_SAVE_REQ once the zone state machine is back in FIELD_IDLE, so the station save screen runs as normal. where you stood goes in save-locations\\ff13-NN.where, and on load the start marker lookup answers with it instead of the station's. only offered with no scene since the last station, solid footing and nothing carrying the player; a missing floor on load falls back along a trail of recent spots, then the station. every hooked site is byte checked against the Steam ffxiiiimg.exe and the add-on stays off on any mismatch, which is why patcher/save_anywhere.py keeps code mods off those sites. off by default. the source header has the details."
+    },
+    {
+      "id": "install_reshade",
+      "label": "Fabula-Lous Shader",
+      "type": "bundled_install",
+      "install_relative_path": "white_data/prog/win/bin",
+      "bundled_files": [
+        {
+          "source": "assets/mods/reshade/d3d9.dll",
+          "target": "ReShade/d3d9.dll",
+          "sha256": "538998f66c0197adcdeadfe8e5ea19dd6ca3253e40399476d291f385ce518b88",
+          "foreign": "refuse"
+        },
+        {
+          "source": "assets/mods/reshade/ReShade.ini",
+          "target": "ReShade/ReShade.ini",
+          "sha256": "7cb0a557daf56c6a79dfe3a090ec5e88d2a73cfc96dda4be8fc11aa31ce25f9a",
+          "config": true
+        },
+        {
+          "source": "assets/mods/reshade/Fabula-Lous Shader.ini",
+          "target": "ReShade/Fabula-Lous Shader.ini",
+          "sha256": "5bafe7c075bb268918ba1e200eee32157b6bb3454485b1c79ca465c958dbc223",
+          "config": true,
+          "was": [
+            "ReShade/Crystarium.ini"
+          ]
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/ReShade.fxh",
+          "target": "ReShade/reshade-shaders/Shaders/ReShade.fxh",
+          "sha256": "6dabfbbaf968c3871905d2ea17f96572ff7b1cec01310b5d0e5252b66b30174f"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/ReShadeUI.fxh",
+          "target": "ReShade/reshade-shaders/Shaders/ReShadeUI.fxh",
+          "sha256": "78adf672df47460297eb9fe6dd238d2aafa24510b52b84feb1a745dff70eb901"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/SMAA.fx",
+          "target": "ReShade/reshade-shaders/Shaders/SMAA.fx",
+          "sha256": "fd6591eeb70ff584ac4d774ed3c79af5efac34f5de1a36f8f873e959259c0007"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/SMAA.fxh",
+          "target": "ReShade/reshade-shaders/Shaders/SMAA.fxh",
+          "sha256": "ee18b0f376585338cdb477a0900757cebac86d3c476ef99955348b55818c8310"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/LumaSharpen.fx",
+          "target": "ReShade/reshade-shaders/Shaders/LumaSharpen.fx",
+          "sha256": "7b358ebbdaa7bc4c44ebf6e9d41afcb3f21ee3dde5c5f85bf40201d5c6044680"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/Curves.fx",
+          "target": "ReShade/reshade-shaders/Shaders/Curves.fx",
+          "sha256": "8368029d2254856505abf7dd789342024465403da49434dd776c6d1af4079a98"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/Vibrance.fx",
+          "target": "ReShade/reshade-shaders/Shaders/Vibrance.fx",
+          "sha256": "b9189a28ca4a645a0e188f8396c81889d217e3c706e8900dfe6594d43e7c33eb"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/FabulaLous.fx",
+          "target": "ReShade/reshade-shaders/Shaders/FabulaLous.fx",
+          "sha256": "1e75fea4372cc72551510cbf333edcb2c5adb3fff21b88f3a945a0b2fcc7681a"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Textures/AreaTex.png",
+          "target": "ReShade/reshade-shaders/Textures/AreaTex.png",
+          "sha256": "0044e6b420a8d98a9dc6a60bedbd43f75cd15ac6052fdedfb2f2f55d3077beed"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Textures/SearchTex.png",
+          "target": "ReShade/reshade-shaders/Textures/SearchTex.png",
+          "sha256": "55a97853ab64174245701accf315ab63d41776c9cb2aa14c675e653684fd96f3"
+        },
+        {
+          "source": "assets/mods/reshade/LICENSE-ReShade.md",
+          "target": "ReShade/LICENSE-ReShade.md",
+          "sha256": "237ded5b8344f820113efab1e65e91e1f159d9202c5b4856606a0590d3ffdab0"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/LICENSE-SweetFX.txt",
+          "target": "ReShade/reshade-shaders/LICENSE-SweetFX.txt",
+          "sha256": "9b2e0b3ff53493f211e39390947716cd16ee559303dac0713ad4b12228dbce51"
+        }
+      ],
+      "default_enabled": false,
+      "requires": [
+        "install_novafix"
+      ],
+      "ui_job_id": "reshade",
+      "in_mods": true,
+      "credit": "ReShade by crosire (BSD 3-Clause), SMAA, LumaSharpen, Curves and Vibrance from CeeJay.dk's SweetFX (MIT), the Fabula-Lous Shader preset and its grade by Cody Le",
+      "player_note": "Fabula-Lous Shader, a ReShade preset I made for this patcher: smoother edges, sharper detail, and a little more contrast and color. Press Home in game to open ReShade's menu.",
+      "notes": "ReShade 6.8.0 (official 32-bit ReShade32.dll, BSD 3-Clause, licence beside it) as ReShade\\d3d9.dll beside NovaFix, the one way NovaFix loads it (backend.cpp, after d3d9_chain.dll). SweetFX's SMAA, LumaSharpen, Curves and Vibrance (MIT) and crosire's ReShade.fxh/ReShadeUI.fxh (CC0) ship with it. Fabula-Lous Shader.ini, ReShade.ini and FabulaLous.fx are ours. ReShade rewrites its ini and preset as they're tweaked, so a changed one stays and ours lands as .new; status goes by the dll and shaders. `was` renames the old Crystarium.ini preset (engine.renamed_bundled). a ReShade of the user's own in that folder is left alone. in_mods puts it under Installed with a Remove."
+    },
+    {
+      "id": "hd_fonts_gui",
+      "label": "HD Fonts and GUI",
+      "type": "nexus",
+      "nexus_game_domain": "finalfantasy13",
+      "nexus_mod_id": "67",
+      "install_relative_path": "white_data/prog/win/bin",
+      "default_enabled": false,
+      "ui_job_id": "hdfonts",
+      "expects": [
+        "version.dll"
+      ],
+      "notes": "4K HD Fonts and GUI by dendonflo, nexusmods.com/finalfantasy13/mods/67. A version.dll that swaps the fonts, menus, icons and map tiles for ones redrawn at 4K as the game loads them, and the hd_textures folder it reads them out of, both beside ffxiiiimg.exe the way its readme says. Its permissions forbid re-uploading it, so it's recommended, not bundled.\n\nWorth getting's Open page watches Downloads for it and what lands goes in like a drop, as a mod that loads itself (patcher/mods/loader_mods.py), so Remove under Installed takes it off whole. Its page has two main files, and the one marked recommended is a Nova Chrysalia package whose options are picked in Nova's own installer, so the row asks for the Standalone Version (Base mod). The drawer's record is named after the download, which carries HD Fonts and GUI, and with expects' version.dll still beside the exe that's how the row knows it's in, and a fix made for it, named for it without the dll, isn't taken for it (bridge.loader_mods). Apply and the command line never pick this entry: Open page is the way in.",
+      "player_note": "Redraws the fonts, menus, icons and map tiles at 4K. Open the page, download the Standalone Version, and the patcher installs it."
+    }
+  ]
+}

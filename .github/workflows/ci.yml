@@ -1,0 +1,58 @@
+name: Tests
+
+# runs the suite on every push, since release.yml only runs on a v* tag.
+# windows-latest because half of this is Windows behaviour (registry, nxm
+# registration, path casing, read-only attributes), and matching release.yml
+# means green here is green there.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# a newer push to the same branch cancels the older run, except on main
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # pytest isn't a runtime dep, so it's not in requirements.txt. No
+      # pyinstaller, nothing here builds an exe.
+      - run: pip install pytest
+      - run: pip install -r requirements.txt
+
+      # assets/manifest.json is generated and gitignored, and test_bridge reads it
+      - run: python tools/build_ui_manifest.py
+
+      # test_bundled_install runs pin_bundled.py --check, so stale hashes fail here
+      - run: pytest -q
+
+  # every effect the presets run, through ReShade 6.8's own parser
+  # (tools/fxcheck), since a shader that won't parse just silently doesn't run
+  # in game. Needs a C++ compiler, so it's on ubuntu.
+  shaders:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: bash tools/fxcheck/build.sh
+      - run: pip install pytest
+      - run: pytest -q tests/test_shader_compile.py

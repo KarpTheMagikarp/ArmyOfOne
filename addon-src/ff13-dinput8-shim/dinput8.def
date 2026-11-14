@@ -1,0 +1,15 @@
+; Everything the real dinput8.dll exports, so a game linked against it finds
+; what it expects here. DirectInput8Create is the one XIII actually imports;
+; the rest are the standard COM entry points and are forwarded for anything
+; else in the process that goes looking.
+;
+; Undecorated on purpose. These are __stdcall, so the linker would otherwise
+; export _DirectInput8Create@20 and the game's import by plain name would not
+; resolve, which on a statically imported DLL means the process never starts.
+LIBRARY dinput8
+EXPORTS
+    DirectInput8Create
+    DllCanUnloadNow
+    DllGetClassObject
+    DllRegisterServer
+    DllUnregisterServer

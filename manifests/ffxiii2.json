@@ -1,0 +1,320 @@
+{
+  "game_id": "ffxiii2",
+  "display_name": "Final Fantasy XIII-2",
+  "manifest_version": "v1.0.0",
+  "steam_app_id": "292140",
+  "ui_id": "ff13-2",
+  "executable_relative_path": "alba_data/prog/win/bin/ffxiii2img.exe",
+  "patches": [
+    {
+      "id": "flip_laa_flag",
+      "label": "4GB Patch",
+      "type": "binary_patch",
+      "operation": "flip_laa_flag",
+      "requires_backup": false,
+      "default_enabled": true,
+      "ui_job_id": "laa",
+      "notes": "kept for XIII-2 only. NovaFix's ff13_2 title adapter states that an LAA-only edit leaves .text and its build fingerprint unchanged, so the 4GB patch and the proxy coexist here. XIII is the opposite and has no LAA patch at all: see ffxiii.json."
+    },
+    {
+      "id": "install_novafix",
+      "label": "NovaFix",
+      "type": "bundled_install",
+      "bundled_files": [
+        {
+          "source": "assets/mods/novafix/d3d9.dll",
+          "target": "d3d9.dll",
+          "sha256": "1e2c96f2101f81bf7d6097e9725c508b127cd143aeb07decbcdda56291b6a458"
+        }
+      ],
+      "default_enabled": true,
+      "requires_backup": false,
+      "credit": "NovaFix by Kartin8 (GPL-3.0)",
+      "player_note": "Fixes the PC port's bugs and unlocks frame rate, VSync and graphics options.",
+      "install_relative_path": "alba_data/prog/win/bin",
+      "ui_job_id": "ff132fix",
+      "replaces": [
+        "install_ff13fix"
+      ],
+      "notes": "the dll is supplied by whoever builds this, not committed, so it carries no sha256: pinning a build the user downloads turns a newer NovaFix release into a hard failure. it is checked for shape instead (real PE, 32-bit), which is what actually goes wrong.\\n\\nreplaces FF13Fix. see ffxiii.json for why the old files are actively removed."
+    },
+    {
+      "id": "hd_texture_pack",
+      "label": "HD Texture Pack",
+      "type": "nexus",
+      "install_relative_path": "alba_data/prog/win",
+      "estimated_size_gb": 4.7,
+      "requires_backup": false,
+      "default_enabled": false,
+      "ui_job_id": "hdproject2",
+      "notes": "FF XIII-2 HD by MJB, nexusmods.com/finalfantasyxiii2/mods/1 (mods/2 is an unrelated cutscene audio mod). Its .bat is replaced rather than run: patcher/mods/hd2_install.py drives the tools it ships, after a verified backup of every archive it touches, and Revert puts that backup back. The mod has no uninstall of its own. Offered in the Mods drawer from a dropped zip or folder rather than through Apply, because the 4.7GB download is still the user's to fetch.",
+      "nexus_game_domain": "finalfantasyxiii2",
+      "nexus_mod_id": "1",
+      "runs_installer": true,
+      "expects": [
+        "*.imgb",
+        "*.trb"
+      ],
+      "categories": [
+        {
+          "id": "zones",
+          "label": "Environments",
+          "zones": true,
+          "default": false,
+          "supported": true,
+          "warn": "The 15 areas the mod covers. Longest job here."
+        },
+        {
+          "id": "weapons",
+          "label": "Weapons",
+          "groups": [
+            "weapon"
+          ],
+          "default": true,
+          "supported": true,
+          "warn": "Every weapon model."
+        },
+        {
+          "id": "npcs",
+          "label": "NPCs",
+          "groups": [
+            "npc"
+          ],
+          "models": "NPCModels.txt",
+          "default": true,
+          "supported": true,
+          "warn": "Unplayable characters you see in the overworld, with 43 of them remodelled."
+        },
+        {
+          "id": "enemies",
+          "label": "Enemies",
+          "groups": [
+            "mon"
+          ],
+          "default": true,
+          "supported": true,
+          "warn": "Monsters and bosses."
+        },
+        {
+          "id": "misc",
+          "label": "Miscellaneous",
+          "groups": [
+            "fa"
+          ],
+          "default": true,
+          "supported": true,
+          "warn": "Props, vehicles and scenery."
+        },
+        {
+          "id": "pcs",
+          "label": "Playable Characters",
+          "groups": [
+            "pc"
+          ],
+          "models": "PCModels.txt",
+          "default": false,
+          "mesh": true,
+          "supported": true,
+          "warn": "The playable characters. Outfits from the Mods drawer, like Apotamkin's Closet, stay."
+        }
+      ]
+    },
+    {
+      "id": "install_audio_fix",
+      "label": "Audio Fix",
+      "type": "bundled_install",
+      "install_relative_path": "alba_data/prog/win/bin/addons/xiii2-audio",
+      "bundled_files": [
+        {
+          "source": "assets/mods/xiii2-audio/xiii2_audio.asi",
+          "target": "xiii2_audio.asi",
+          "sha256": "7fe290f935d4beb721669dbdae87a716f8891f2a670f8994a0fe196fc8178f9f"
+        },
+        {
+          "source": "assets/mods/xiii2-audio/xiii2-audio.ini",
+          "target": "xiii2-audio.ini",
+          "config": true,
+          "sha256": "4ba72e358090054288e81802e8097b42adb3717dc5911f68f43f0c77e6f1a360"
+        },
+        {
+          "source": "assets/mods/xiii2-audio/LICENSE-MinHook.txt",
+          "target": "LICENSE-MinHook.txt",
+          "sha256": "d5c2224982b0b95a16b098a561335fa93f3eaf4d0aa964b7843edb986df78dc8"
+        }
+      ],
+      "requires": [
+        "install_novafix"
+      ],
+      "default_enabled": true,
+      "requires_backup": false,
+      "ui_job_id": "audio",
+      "build_guard": "xiii2_audio",
+      "credit": "made for this patcher, with MinHook by Tsuda Kageyu (BSD 2-Clause)",
+      "player_note": "Fixes muffled voices and sound effects, clipping, and the buzz on 7.1 setups.",
+      "notes": "a NovaFix add-on (addon-src/xiii2-audio, tools/build_xiii2_audio.sh), so it goes in after NovaFix and lands in whichever add-on folder NovaFix is actually reading. three fixes in the Steam ffxiii2img.exe's sound driver: the IIR filter XAPO's low pass treats XAudio2's 'no filter' setting (frequency 1.0) as a real low pass at a sixth of the sample rate, so the coefficient call hands back a pass-through biquad there; StereoMixdownAPO's matrix sums to nearly 3x full scale, so its Process is replaced with an ITU downmix and a peak limiter; and that same APO, switched off on anything but stereo, never writes channels 7 and 8 of a 7.1 device, which is the buzz. Bink's cutscene audio goes out through waveOut, outside all of this, so cutscenes stay stereo.\n\nxiii2-audio.ini is config: each fix has its own switch, read at launch.\n\nonly the Steam ffxiii2img.exe. each hook site's bytes are checked first, and anything else gets a line in xiii2-audio.log and an add-on that does nothing.\n\nthis replaced cyanea-bt's FFXIII-2 AudioFix, which isn't ours to redistribute. build_guard xiii2_audio leaves ours out wherever theirs is found (beside the exe, or anywhere under the add-on folder, by the name in its version info), and the add-on itself stays off at launch if theirs turns up later."
+    },
+    {
+      "id": "restore_console_content",
+      "label": "DLC Restoration",
+      "type": "manual",
+      "manual_url": "https://community.pcgamingwiki.com/files/file/2871-final-fantasy-xiii-2-console-content-patch-v23/",
+      "default_enabled": false,
+      "ui_job_id": "dlcrestore",
+      "notes": "was hosted on Krisan Thyme's Patreon, which is gone. PCGamingWiki's community files carry v2.3 now.\n\nstays type=manual for Apply and the command line: its download is a .bat around xdelta and Cocoon, which nothing here runs. The Mods drawer reads that .bat instead (patcher/mods/recipes.py): it reverts the Steam update's archives to the 1.0 release's with xdelta, then injects two files with Cocoon, and what those come to is decoded out of the patches record by record and put in as one drawer mod, in both voice sets, which Remove takes off. recipes is that .bat by name, which is how the row knows it's in, and download_names is what Open page's watch takes from Downloads, since PCGamingWiki's files don't carry a mod id the way Nexus's do. The size is v2.3's .7z, for the download's percentage.",
+      "player_note": "Brings back the outfits, weapons and accessories cut from the Steam release. Open the page, download it, and the patcher puts it in from the Mods drawer.",
+      "expects": [
+        "white_imgu.win32.bin",
+        "filelistu.win32.bin"
+      ],
+      "recipes": [
+        "Install Console Content Patch.bat"
+      ],
+      "download_names": [
+        "*console*content*patch*"
+      ],
+      "download_sizes": {
+        "FFXIII-2_-_Console_Content_Patch_v2.3.7z": 7994027
+      }
+    },
+    {
+      "id": "install_leviathans_tears",
+      "label": "Leviathan's Tears",
+      "type": "archive_inject",
+      "archive_relative_dir": "alba_data/sys",
+      "archive_variants": [
+        "u",
+        "c"
+      ],
+      "injections": [
+        {
+          "game_path": "vfx/field/weather/weather07/veffs.jp.win32.imgb",
+          "sha256": "dd4a8504f3111f58a39689eda4920e8d45f9496280b48169cd0e15158a28c75c"
+        },
+        {
+          "game_path": "vfx/field/weather/weather08/veffs.jp.win32.imgb",
+          "sha256": "dd4a8504f3111f58a39689eda4920e8d45f9496280b48169cd0e15158a28c75c"
+        }
+      ],
+      "default_enabled": false,
+      "retired": true,
+      "requires_backup": false,
+      "ui_job_id": "leviathanstears",
+      "in_mods": true,
+      "notes": "retired: it doesn't ship any more and Apply never puts it in. Its row is gone, and so is the payload.\n\nthe entry stays for what an earlier version applied. scan() still finds it in white_img by the pins below, so it reads as in, and in_mods lists it under the drawer's Installed, where Remove is revert_patch: the archives back from the span journals, both voice sets as one transaction. Revert takes it off the same way. the injections are what that version wrote and nothing more, game paths and pins, which is all either of those reads.",
+      "credit": "Leviathan's Tears by Krisan Thyme, with Echelo and Scarlet Crusade"
+    },
+    {
+      "id": "install_reshade",
+      "label": "Fabula-Lous Shader",
+      "type": "bundled_install",
+      "install_relative_path": "alba_data/prog/win/bin",
+      "bundled_files": [
+        {
+          "source": "assets/mods/reshade/d3d9.dll",
+          "target": "ReShade/d3d9.dll",
+          "sha256": "538998f66c0197adcdeadfe8e5ea19dd6ca3253e40399476d291f385ce518b88",
+          "foreign": "refuse"
+        },
+        {
+          "source": "assets/mods/reshade/ReShade.ini",
+          "target": "ReShade/ReShade.ini",
+          "sha256": "7cb0a557daf56c6a79dfe3a090ec5e88d2a73cfc96dda4be8fc11aa31ce25f9a",
+          "config": true
+        },
+        {
+          "source": "assets/mods/reshade/Fabula-Lous Shader XIII-2.ini",
+          "target": "ReShade/Fabula-Lous Shader.ini",
+          "sha256": "4a409a68b9b1c0ea72d59cb62da002a987dec448213f276958dbcddd91bc553d",
+          "config": true,
+          "was": [
+            "ReShade/Crystarium.ini"
+          ]
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/ReShade.fxh",
+          "target": "ReShade/reshade-shaders/Shaders/ReShade.fxh",
+          "sha256": "6dabfbbaf968c3871905d2ea17f96572ff7b1cec01310b5d0e5252b66b30174f"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/ReShadeUI.fxh",
+          "target": "ReShade/reshade-shaders/Shaders/ReShadeUI.fxh",
+          "sha256": "78adf672df47460297eb9fe6dd238d2aafa24510b52b84feb1a745dff70eb901"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/SMAA.fx",
+          "target": "ReShade/reshade-shaders/Shaders/SMAA.fx",
+          "sha256": "fd6591eeb70ff584ac4d774ed3c79af5efac34f5de1a36f8f873e959259c0007"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/SMAA.fxh",
+          "target": "ReShade/reshade-shaders/Shaders/SMAA.fxh",
+          "sha256": "ee18b0f376585338cdb477a0900757cebac86d3c476ef99955348b55818c8310"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/LumaSharpen.fx",
+          "target": "ReShade/reshade-shaders/Shaders/LumaSharpen.fx",
+          "sha256": "7b358ebbdaa7bc4c44ebf6e9d41afcb3f21ee3dde5c5f85bf40201d5c6044680"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/Curves.fx",
+          "target": "ReShade/reshade-shaders/Shaders/Curves.fx",
+          "sha256": "8368029d2254856505abf7dd789342024465403da49434dd776c6d1af4079a98"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/Vibrance.fx",
+          "target": "ReShade/reshade-shaders/Shaders/Vibrance.fx",
+          "sha256": "b9189a28ca4a645a0e188f8396c81889d217e3c706e8900dfe6594d43e7c33eb"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Shaders/FabulaLous.fx",
+          "target": "ReShade/reshade-shaders/Shaders/FabulaLous.fx",
+          "sha256": "1e75fea4372cc72551510cbf333edcb2c5adb3fff21b88f3a945a0b2fcc7681a"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Textures/AreaTex.png",
+          "target": "ReShade/reshade-shaders/Textures/AreaTex.png",
+          "sha256": "0044e6b420a8d98a9dc6a60bedbd43f75cd15ac6052fdedfb2f2f55d3077beed"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/Textures/SearchTex.png",
+          "target": "ReShade/reshade-shaders/Textures/SearchTex.png",
+          "sha256": "55a97853ab64174245701accf315ab63d41776c9cb2aa14c675e653684fd96f3"
+        },
+        {
+          "source": "assets/mods/reshade/LICENSE-ReShade.md",
+          "target": "ReShade/LICENSE-ReShade.md",
+          "sha256": "237ded5b8344f820113efab1e65e91e1f159d9202c5b4856606a0590d3ffdab0"
+        },
+        {
+          "source": "assets/mods/reshade/reshade-shaders/LICENSE-SweetFX.txt",
+          "target": "ReShade/reshade-shaders/LICENSE-SweetFX.txt",
+          "sha256": "9b2e0b3ff53493f211e39390947716cd16ee559303dac0713ad4b12228dbce51"
+        }
+      ],
+      "default_enabled": false,
+      "requires": [
+        "install_novafix"
+      ],
+      "ui_job_id": "reshade",
+      "in_mods": true,
+      "credit": "ReShade by crosire (BSD 3-Clause), SMAA, LumaSharpen, Curves and Vibrance from CeeJay.dk's SweetFX (MIT), the Fabula-Lous Shader preset and its grade by Cody Le",
+      "player_note": "Fabula-Lous Shader, a ReShade preset I made for this patcher: smoother edges, sharper detail, and a little more contrast and color. Press Home in game to open ReShade's menu.",
+      "notes": "the same ReShade 6.8 and shaders as XIII's, file for file and pin for pin, with a preset of XIII-2's own: Fabula-Lous Shader XIII-2.ini goes in under the same name, so ReShade.ini, the row and the drawer don't tell them apart. It turns on FABULA_HAZE in FabulaLous.fx, which measures how far the frame's darkest level sits off black and takes that veil off hazy places (the desert at dusk, New Bodhum, Academia's streets) while a dark room, which has none, keeps its shadows, one lift per pixel so hues stay put, with contrast at 0.12, a small pull on the bright end (0.02) and vibrance at 0.24. ffxiii.json says where each file comes from and why the two settings files are config.\n\nit goes in a ReShade folder beside XIII-2's NovaFix in alba_data\\prog\\win\\bin. NovaFix's renderer pick is one piece of code for every title (d3d9/backend.cpp): on Automatic it takes ReShade\\d3d9.dll beside the proxy, after d3d9_chain.dll and before the system's."
+    },
+    {
+      "id": "hd_fonts_gui",
+      "label": "HD Fonts and GUI",
+      "type": "nexus",
+      "nexus_game_domain": "finalfantasyxiii2",
+      "nexus_mod_id": "40",
+      "install_relative_path": "alba_data/prog/win/bin",
+      "default_enabled": false,
+      "ui_job_id": "hdfonts",
+      "expects": [
+        "version.dll"
+      ],
+      "notes": "4K HD Fonts and GUI plus Shader Fixes by dendonflo, nexusmods.com/finalfantasyxiii2/mods/40. A version.dll with hd_textures and hd_textures_shaders beside ffxiii2img.exe: the fonts, menus, icons and map tiles redrawn at 4K, and some of the game's pixel shaders swapped as they're made, for shadow transparency, rain and depth of field. Its permissions forbid re-uploading it, so it's recommended, not bundled.\n\nThe drop layout the drawer was first built against (tests/test_mod_drops.py). Open page watches Downloads and what lands goes in like a drop, as a mod that loads itself, with Remove under Installed. Like XIII's, the row asks for the Standalone Version over the Nova package its page recommends, and knows it's in by its record's name with version.dll beside the exe (bridge.loader_mods). It wraps the D3D9 device in one of its own and NovaFix and ReShade both sit under it, which a stand-in for the game under wine runs with ReShade loaded.",
+      "player_note": "Redraws the fonts, menus, icons and map tiles at 4K, and fixes shadow transparency, rain and depth of field. Open the page, download the Standalone Version, and the patcher installs it."
+    }
+  ]
+}

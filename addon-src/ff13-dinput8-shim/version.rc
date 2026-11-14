@@ -1,0 +1,33 @@
+// What NovaFix's add-on popup calls this file. Without a name of its own it
+// takes the module's, and the game imports it as DINPUT8.dll, so that's what
+// the popup said
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // en-US, Unicode: the first pair NovaFix tries when the table says nothing
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "FFXIII Trilogy Patcher"
+            VALUE "FileDescription",  "Serves the DRM's self-check a clean copy of the exe"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "dinput8"
+            VALUE "OriginalFilename", "dinput8.dll"
+            VALUE "ProductName",      "FFXIII 4GB Compatibility"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
