@@ -22,6 +22,9 @@ permissions:
 jobs:
   test:
     runs-on: windows-latest
+    # a full run is about 20 minutes. Anything waiting on a dialog nobody can
+    # click would otherwise burn the default six hours
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -38,8 +41,10 @@ jobs:
       # assets/manifest.json is generated and gitignored, and test_bridge reads it
       - run: python tools/build_ui_manifest.py
 
-      # test_bundled_install runs pin_bundled.py --check, so stale hashes fail here
-      - run: pytest -q
+      # test_bundled_install runs pin_bundled.py --check, so stale hashes fail here.
+      # tmp on the runner's D: drive, which has far more room than C:. A single
+      # test can still hold a couple of full size archives at once
+      - run: pytest -q --basetemp "$env:RUNNER_TEMP\pytest"
 
   # every effect the presets run, through ReShade 6.8's own parser
   # (tools/fxcheck), since a shader that won't parse just silently doesn't run

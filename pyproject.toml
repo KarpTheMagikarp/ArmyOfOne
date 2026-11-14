@@ -2,3 +2,7 @@
 # so `from patcher...` and `from tests.helpers...` work without installing anything
 pythonpath = ["."]
 testpaths = ["tests"]
+# the fake archives are full size (1.6 GB each) and only free on Linux because
+# truncate makes them sparse. NTFS allocates every byte, so keeping every
+# passing test's tmp dir filled the CI runner's disk 80% of the way through
+tmp_path_retention_policy = "failed"
