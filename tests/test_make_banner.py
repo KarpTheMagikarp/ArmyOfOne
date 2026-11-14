@@ -7,8 +7,12 @@ import importlib.util
 import subprocess
 from pathlib import Path
 
-import numpy as np
 import pytest
+
+# make_banner is a demo-video tool, so its deps aren't in requirements.txt and
+# CI doesn't have them. skip, like test_relines does, instead of erroring the run
+np = pytest.importorskip("numpy")
+pytest.importorskip("PIL")
 
 ROOT = Path(__file__).resolve().parent.parent
 pytest.importorskip("fontTools")
