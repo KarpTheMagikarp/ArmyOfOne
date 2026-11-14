@@ -46,7 +46,7 @@ def test_main_still_reaches_the_event_loop():
     assert "webview.create_window" in calls
 
 
-def test_main_gets_all_the_way_to_start_with_a_stand_in_pywebview():
+def test_main_gets_all_the_way_to_start_with_a_stand_in_pywebview(monkeypatch):
     """
     The static check above proves the call is still in the function. This
     proves the function reaches it, which is a different claim: everything
@@ -86,6 +86,16 @@ def test_main_gets_all_the_way_to_start_with_a_stand_in_pywebview():
     fake.dom.DOMEventHandler = lambda *a, **k: None
 
     import shell
+
+    # the stand-in start() never runs the loop, so main() complains that the
+    # window never opened. On Windows that's a real MessageBox, and nobody's
+    # there to click OK on a CI runner, so the run just sat there for an hour
+    complaints = []
+    monkeypatch.setattr(shell, "complain", complaints.append)
+    # and on Windows the real one would claim nxm:// in whoever's registry is
+    # running the tests
+    monkeypatch.setattr("patcher.nxm_registry.ensure_registered",
+                        lambda *a, **k: types.SimpleNamespace(error=None, ours=False, owner="test"))
 
     argv, modules = sys.argv, dict(sys.modules)
     sys.argv = ["shell.py"]
