@@ -559,3 +559,19 @@ def test_the_journal_only_ever_holds_the_field_youre_in():
     note = source[source.index("void Note(Op op,"):]
     note = note[:note.index("\n}\n")]
     assert 'if (zone != g_worldZone) ForgetWorld("a new zone");' in note
+
+
+def test_a_load_waits_for_the_real_rebuild_before_putting_anything_back():
+    """
+    the first free roam after a load is the stand-in at 0 1.5 -10, before the
+    station's load script has run. A replay there hung the load for good (Nov
+    15), so it waits for the player, quiet calls, and the same map set
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    wait = tick[tick.index("if (g_worldCheckWanted"):]
+    wait = wait[:wait.index("CheckWorld();")]
+    assert "!StandIn(at)" in wait and "g_lastNoteAt" in wait
+    check = source[source.index("void CheckWorld() {"):]
+    assert check.index("g_pendingMapSet != MapSetName()") < check.index("Replay(e)")

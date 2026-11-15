@@ -491,6 +491,12 @@ bool Position(DWORD handle, Vec4& out) {
     return true;
 }
 
+// right after a load the player handle points at a stand-in, which sits at
+// 0 1.5 -10 whatever the field
+bool StandIn(const Vec4& at) {
+    return std::fabs(at.v[0]) < 0.01f && std::fabs(at.v[1] - 1.5f) < 0.01f && std::fabs(at.v[2] + 10.0f) < 0.01f;
+}
+
 Vec4 Translation(const float* matrix) {
     Vec4 out{};
     std::memcpy(out.v, matrix + 12, sizeof out.v);
@@ -642,6 +648,7 @@ std::vector<Entry> g_world;
 int g_worldZone = -1;
 // a load of ours: what the save's journal says, put back once the rebuild's done
 std::vector<Entry> g_pending;
+std::string g_pendingMapSet;
 bool g_pendingWanted = false;
 // with Debug on, a station save keeps its journal too, in debug\, so loading
 // it can say how much of that world the game's own rebuild brought back
@@ -652,6 +659,8 @@ std::vector<Entry> g_savedWorld;
 int g_savedZone = -1;
 std::string g_savedMapSet = "-";
 int g_worldLines = 0;
+// when the journal last saw a call, so a load can wait out the rebuild
+std::atomic<ULONGLONG> g_lastNoteAt{0};
 
 int ZoneNumber() {
     unsigned char* party = *g_party;
@@ -707,6 +716,7 @@ void Note(Op op, const char* a, const char* b, int i, int j) {
                   g_world.end());
     g_world.push_back(e);
     LeaveCriticalSection(&g_worldLock);
+    g_lastNoteAt = GetTickCount64();
     // a station load alone is a few dozen of these
     if (g_debug && g_worldLines < 4000) {
         ++g_worldLines;
@@ -1201,7 +1211,7 @@ bool Unhex(const char* hex, char* out) {
 
 // a journal that doesn't read back whole is dropped whole: half of one would
 // put back half a world
-bool ReadWorld(FILE* file, std::vector<Entry>& out, int* zone = nullptr) {
+bool ReadWorld(FILE* file, std::vector<Entry>& out, int* zone = nullptr, std::string* mapsetOut = nullptr) {
     out.clear();
     char mapset[32]{};
     int z = -1;
@@ -1210,6 +1220,7 @@ bool ReadWorld(FILE* file, std::vector<Entry>& out, int* zone = nullptr) {
         count > 100000)
         return false;
     if (zone) *zone = z;
+    if (mapsetOut) *mapsetOut = mapset;
     for (unsigned n = 0; n < count; ++n) {
         int op = 0;
         char a[40]{}, b[40]{};
@@ -1286,7 +1297,7 @@ bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& mat
     // and older ones no journal: the spot still works, there's just nothing to put back
     if (world) {
         world->clear();
-        if (ok && read == count && version >= 5 && !ReadWorld(file, *world))
+        if (ok && read == count && version >= 5 && !ReadWorld(file, *world, nullptr, &g_pendingMapSet))
             Log("slot %d's world journal didn't read back, loading without it", slot);
     }
     fclose(file);
@@ -1807,6 +1818,14 @@ void CheckWorld() {
     int other = 0;
     if (g_pendingWanted) {
         g_pendingWanted = false;
+        // a different map set means the rebuild built some other piece of the
+        // zone, and the journal's names may not be in it. Leave it be
+        if (g_pendingMapSet != MapSetName()) {
+            Log("saved on map set %s but the rebuild loaded %s, leaving the field as the game built it",
+                g_pendingMapSet.c_str(), MapSetName().c_str());
+            g_pending.clear();
+            return;
+        }
         const std::vector<Entry> missing = Missing(g_pending, have, &other);
         LogMissing("putting the field back the way it was saved", missing, other);
         for (const Entry& e : missing) Replay(e);
@@ -1932,11 +1951,17 @@ void Tick() {
             }
         }
     }
-    // the station's load script runs before free roam does, so a moment of
-    // free roam means the rebuild's had its go
-    if (g_worldCheckWanted && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 300) {
-        g_worldCheckWanted = false;
-        CheckWorld();
+    // not the first free roam after a load: that's the stand-in at 0 1.5 -10,
+    // before the station's load script has even run (Nov 15, a replay there
+    // hung the load for good). The script runs, hands off through its own
+    // scene, and only then is it you, in free roam, with the calls gone quiet
+    if (g_worldCheckWanted && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 1000 &&
+        now - g_lastNoteAt.load() > 1000) {
+        Vec4 at{};
+        if (Position(PlayerHandle(), at) && !StandIn(at)) {
+            g_worldCheckWanted = false;
+            CheckWorld();
+        }
     }
     if (state == kStateFieldPause && g_lastState != kStateFieldPause && g_phase == Phase::Idle && g_enabled) {
         if (const char* why = Withheld()) Log("save not offered: %s", why);
@@ -2303,7 +2328,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.24, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.24.1, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2343,7 +2368,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.24";
+    d.version = "0.24.1";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
