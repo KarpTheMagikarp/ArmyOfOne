@@ -1177,6 +1177,8 @@ void Tidy() {
 
 // names go as hex: they're the script's strings, and a space in one would
 // throw the reader off every line after it
+void Moment(const char* what);
+
 void WriteWorld(FILE* file, const std::vector<Entry>& world, int zone, const std::string& mapset) {
     fprintf(file, "world %d %s %u\n", zone, mapset.c_str(), static_cast<unsigned>(world.size()));
     for (const Entry& e : world) {
@@ -1245,6 +1247,7 @@ void WriteWhere(const SlotHash& save) {
     fprintf(file, "\n");
     WriteWorld(file, g_savedWorld, g_savedZone, g_savedMapSet);
     fclose(file);
+    Moment("saved with save anywhere");
     Log("saved slot %d at %.2f %.2f %.2f, %u things the scripts did to the field kept with it", save.slot, m[12],
         m[13], m[14], static_cast<unsigned>(g_savedWorld.size()));
     static Progress savedAt;
@@ -1767,10 +1770,39 @@ const char* RawPress(bool& held) {
     return source;
 }
 
+// a line that says where and when, at the moments the journal is about: a
+// scene handing back to free roam, walking into a station, a save, a load.
+// With Debug on it lists what the field gained since the last one too, so a
+// story beat's changes read as one block without knowing where to look
+std::vector<Entry> g_lastMoment;
+bool g_wasScene = false;
+
+void Moment(const char* what) {
+    const std::vector<Entry> now = WorldNow();
+    Vec4 at{};
+    Position(PlayerHandle(), at);
+    unsigned char* party = *g_party;
+    const int scenario = party ? *reinterpret_cast<int*>(party + kWork) : -1;
+    std::vector<Entry> moved;
+    for (const Entry& e : now)
+        if (std::none_of(g_lastMoment.begin(), g_lastMoment.end(), [&](const Entry& x) { return SameEffect(x, e); }))
+            moved.push_back(e);
+    Log("moment: %s. Zone %d, story %d, scenario %d, map set %s, at %.1f %.1f %.1f, %u field changes kept, %u new "
+        "since the last moment", what, ZoneNumber(), g_story(), scenario, MapSetName().c_str(), at.v[0], at.v[1],
+        at.v[2], static_cast<unsigned>(now.size()), static_cast<unsigned>(moved.size()));
+    for (size_t k = 0; g_debug && k < moved.size() && k < 60; ++k) {
+        char text[96];
+        Describe(moved[k], text, sizeof text);
+        Log("    + %s", text);
+    }
+    g_lastMoment = now;
+}
+
 // once a load's rebuild is done: a save of ours gets back whatever the
 // station's load script didn't do, and with Debug on a station save's load
 // says what the game's own rebuild missed, which is what this is all for
 void CheckWorld() {
+    Moment("loaded, the station's rebuild is done");
     const std::vector<Entry> have = WorldNow();
     int other = 0;
     if (g_pendingWanted) {
@@ -1847,7 +1879,13 @@ void Tick() {
         g_sceneSince = state;
         Log("scene (state %d), save anywhere waits for the next station", state);
     }
+    if (InScene(state)) g_wasScene = true;
+    else if (g_wasScene && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 500) {
+        g_wasScene = false;
+        Moment("back in free roam after a scene");
+    }
     if (g_areaEntered.exchange(false) && state == kStateFieldIdle) {
+        Moment("walked into a station's area");
         Sanctify("a station");
         // a load that started you inside the area is settled by this too
         if (g_sanction == kLoad) g_sanction = kNone;
@@ -1868,6 +1906,7 @@ void Tick() {
     // settled for 2 s past the stand-in, the way the land check waits
     if (g_sanction != kNone && g_idleSince && now - g_idleSince > 2000) {
         if (g_sanction == kStation) {
+            Moment("saved at a station");
             Sanctify("the last station save");
             g_sanction = kNone;
         } else if (g_sanction == kOurs) {
