@@ -532,6 +532,10 @@ struct Sample {
 };
 Sample g_track[16]{};
 int g_trackNext = 0;
+// the footing flag as of the last free roam sample. The game clears that bit
+// a frame or two into the pause screen, so a live read there always says she
+// isn't on the floor. She can't move while paused, so the last sample stands
+bool g_idleSolid = false;
 // which of the two rows is her facing, learnt from her own walking: moving
 // under her own steam she goes the way she faces. Not judged until it's clear
 int g_axisVotes[2]{};
@@ -683,11 +687,12 @@ void DumpActor() {
     Footing footing;
     const bool footed = ReadFooting(PlayerHandle(), footing);
     Log("  dumped the leader (%p, %u bytes, %d hops) to pause-%02d, at %.2f %.2f %.2f: sideways %.2f u/s, "
-        "rise %.2f, steady %d, carried %d, facing row %d, up %.2f %.2f %.2f, floor %d (read %d), last floor %.2f %.2f %.2f",
+        "rise %.2f, steady %d, carried %d, facing row %d, up %.2f %.2f %.2f, floor %d (read %d, last free roam %d), "
+        "last floor %.2f %.2f %.2f",
         static_cast<void*>(actor), static_cast<unsigned>(got), hopCount, dumps, at.v[0], at.v[1], at.v[2], speed,
         rise, steady, Carried(), FacingAxis() * 2, *reinterpret_cast<float*>(copy + 0x88),
         *reinterpret_cast<float*>(copy + 0x8C), *reinterpret_cast<float*>(copy + 0x90), footing.solid, footed,
-        footing.ground.v[0], footing.ground.v[1], footing.ground.v[2]);
+        g_idleSolid, footing.ground.v[0], footing.ground.v[1], footing.ground.v[2]);
 }
 
 // the spot as the spawn should get it: upright, since the live matrix leans
@@ -918,8 +923,7 @@ const char* Withheld() {
         std::snprintf(why, sizeof why, "%s since you were last at a station", moved);
         return why;
     }
-    Footing footing;
-    if (!ReadFooting(PlayerHandle(), footing) || !footing.solid)
+    if (!g_idleSolid)
         return "she isn't on the level's own floor (a lift, a platform, mid-air, or not moved since loading)";
     float rise = 0;
     if (!Steady(rise)) return "you were going up or down (a lift, a fall or a jump)";
@@ -1286,7 +1290,10 @@ void Tick() {
     if (state != kStateFieldIdle) g_idleSince = 0;
     else if (!g_idleSince) g_idleSince = now;
     // a new field's coordinates aren't the old one's
-    if (state == 1 || state == 2) g_trailCount = 0;
+    if (state == 1 || state == 2) {
+        g_trailCount = 0;
+        g_idleSolid = false;
+    }
     const Sample& prev = g_track[(g_trackNext + 15) % 16];
     if (state == kStateFieldIdle && now - prev.at >= 40) {
         Matrix m{};
@@ -1306,8 +1313,10 @@ void Tick() {
             g_track[g_trackNext++ % 16] = next;
             float rise = 0;
             Footing footing;
-            if (g_sanctioned.story >= 0 && g_sceneSince < 0 && Steady(rise) && !Carried() &&
-                ReadFooting(PlayerHandle(), footing) && footing.solid)
+            // not in the first beat back from a pause either, before the game has
+            // put the bit back. The save fires right in that beat
+            if (now - g_idleSince >= 100) g_idleSolid = ReadFooting(PlayerHandle(), footing) && footing.solid;
+            if (g_sanctioned.story >= 0 && g_sceneSince < 0 && Steady(rise) && !Carried() && g_idleSolid)
                 Remember(next.pos);
         }
     }
@@ -1683,7 +1692,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.21, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.22, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -1720,7 +1729,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.21";
+    d.version = "0.22";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

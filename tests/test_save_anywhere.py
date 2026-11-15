@@ -438,7 +438,7 @@ def test_platforms_any_way_they_move_and_where_a_missing_floor_sends_you():
     assert 'fprintf(file, "\\ntrail %d", g_savedTrailCount);' in source
     # a station starts a fresh trail, and a new field throws the old one away
     assert "g_trailCount = 0;" in source[source.index("void Sanctify("):]
-    assert "if (state == 1 || state == 2) g_trailCount = 0;" in source
+    assert "if (state == 1 || state == 2) {\n        g_trailCount = 0;" in source
 
 
 def test_save_waits_for_the_levels_own_floor():
@@ -446,18 +446,25 @@ def test_save_waits_for_the_levels_own_floor():
     the game's own footing flag (bit 22 at [actor+0x10]+0x380, read off two
     labelled test runs) is off on lifts, platforms and in the air, so Save
     needs it on, and the trail of fallback spots only keeps floor she stood on
-    while it was. Anything unreadable counts as off
+    while it was. Anything unreadable counts as off.
+
+    The pause screen clears that bit a frame or two in, so Withheld goes by the
+    last free roam sample, not a live read. A live read there turned every
+    press into a refusal (chapter 2, Nov 14)
     """
     source = SOURCE.read_text(encoding="utf-8")
     assert "constexpr DWORD kActorFooting = 0x10, kFootingFlags = 0x380, kFootingGround = 0x398;" in source
     assert "constexpr DWORD kOnLevelFloor = 1u << 22;" in source
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
-    assert "!ReadFooting(PlayerHandle(), footing) || !footing.solid" in withheld
+    assert "if (!g_idleSolid)" in withheld and "ReadFooting" not in withheld
     footing = source[source.index("bool ReadFooting(DWORD handle, Footing& out) {"):]
     footing = footing[:footing.index("\n}\n")]
     assert "if (got < sizeof block) return false;" in footing
-    assert "ReadFooting(PlayerHandle(), footing) && footing.solid)\n                Remember(next.pos);" in source
+    assert "if (now - g_idleSince >= 100) g_idleSolid = ReadFooting(PlayerHandle(), footing) && footing.solid;" in source
+    assert "!Carried() && g_idleSolid)\n                Remember(next.pos);" in source
+    # a new field starts her off the floor until she's sampled standing on it
+    assert "g_trailCount = 0;\n        g_idleSolid = false;" in source
 
 
 def test_spots_and_dumps_keep_to_their_own_folders():
