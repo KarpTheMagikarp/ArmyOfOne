@@ -659,6 +659,7 @@ int g_worldZone = -1;
 // a load of ours: what the save's journal says, put back once the rebuild's done
 std::vector<Entry> g_pending;
 std::string g_pendingMapSet;
+int g_pendingZone = -1;
 bool g_pendingWanted = false;
 // with Debug on, a station save keeps its journal too, in debug\, so loading
 // it can say how much of that world the game's own rebuild brought back
@@ -813,23 +814,18 @@ int __cdecl EncountHook(int on) {
     return out;
 }
 
-// mset_hgcr_0304a is the 0304 set with the far end streamed in: the engine
-// swaps between those as you walk. A station's load script always asks for
-// the one by the station, so a spot saved out in the other one loaded into
-// sky until a walk across a swap box fetched it back (Nov 15)
-std::string Family(const std::string& set) {
-    std::string out = set;
-    while (!out.empty() && out.back() >= 'a' && out.back() <= 'z') out.pop_back();
-    return out;
-}
-
+// the engine swaps map sets as you walk (0304 to 0304a, 0913b to 1310b),
+// and a station keeps being the save point well past where its own set
+// ends. Its load script always asks for the set by the station, so a spot
+// saved out in another one loaded into sky until a walk across a swap box
+// fetched the right one (Nov 15, twice). Whatever the set was when you saved
+// is the one that holds your spot, and the zone's areas and boxes don't care
+// which set is in: the game swaps under them all the time
 int __fastcall MapSetHook(void* zone, void* edx, const char* name) {
     if (g_debug && name) Log("  world: map set %s asked for", Name(name).c_str());
-    // a load of ours, and the rebuild asking for a sibling of the set it was
-    // saved on: the saved one, so the field comes up the way it was
-    if (name && g_pendingWanted && g_pendingMapSet != "-") {
+    if (name && g_pendingWanted && g_pendingMapSet != "-" && g_pendingZone == ZoneNumber()) {
         const std::string asked = Name(name);
-        if (asked != g_pendingMapSet && Family(asked) == Family(g_pendingMapSet) && g_pendingMapSet.size() < 16) {
+        if (asked != g_pendingMapSet && g_pendingMapSet.size() < 16) {
             char want[16]{};
             std::memcpy(want, g_pendingMapSet.data(), g_pendingMapSet.size());
             Log("the station's load asked for map set %s, loading %s instead, the one it was saved on",
@@ -1349,7 +1345,7 @@ bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& mat
     // and older ones no journal: the spot still works, there's just nothing to put back
     if (world) {
         world->clear();
-        if (ok && read == count && version >= 6 && !ReadWorld(file, *world, nullptr, &g_pendingMapSet))
+        if (ok && read == count && version >= 6 && !ReadWorld(file, *world, &g_pendingZone, &g_pendingMapSet))
             Log("slot %d's world journal didn't read back, loading without it", slot);
     }
     fclose(file);
@@ -1382,6 +1378,18 @@ int SlotOf(const char* name) {
 // save was ever seen)
 int __fastcall SaveWriteHook(unsigned char* self, void* edx, int a, int b, const void* data, int size) {
     const int slot = static_cast<signed char>(self[0x14A]);
+    // terminal saves still weren't caught by the name check (Nov 15), so
+    // every write says what it carried until that's pinned down
+    if (g_debug) {
+        char name[33]{};
+        for (int k = 0; k < 32; ++k) {
+            const char c = reinterpret_cast<const char*>(self)[0x172 + k];
+            if (!c) break;
+            name[k] = c >= 0x20 && c < 0x7F ? c : '?';
+        }
+        Log("slot write: slot %d, name \"%s\", %d bytes, state %d, ours %d, args %d %d", slot, name, size,
+            g_stateForFiles.load(), g_ourSave.load() ? 1 : 0, a, b);
+    }
     // a save slot by its own file name too (the save screen lists, so reads,
     // every slot first), so nothing else the writer ever writes can pass for one
     if (!g_ourSave.load() && slot >= 0 && SlotOf(reinterpret_cast<const char*>(self + 0x172)) == slot && data &&
@@ -1596,6 +1604,7 @@ void TryArm(int marker) {
     g_worldCheckWanted = true;
     g_pendingWanted = false;
     g_pendingMapSet = "-";
+    g_pendingZone = -1;
 
     unsigned long long stored = 0;
     SavePoint point{}, now{};
@@ -2389,7 +2398,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.24.2, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.24.3, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2429,7 +2438,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.24.2";
+    d.version = "0.24.3";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

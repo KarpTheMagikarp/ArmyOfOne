@@ -595,9 +595,9 @@ def test_only_what_a_script_asked_for_goes_in_the_journal():
     assert "version >= 6 && !ReadWorld(" in source
 
 
-def test_a_spot_saved_in_a_streamed_in_map_set_loads_into_that_set():
-    """0304a is 0304 with the far end streamed in, and a station's load always asks for its own, so a spot out in the other one loaded into sky (Nov 15)"""
+def test_a_spot_loads_into_the_map_set_it_was_saved_in():
+    """a station stays the save point past where its own map set ends, and its load always asks for its own, so a spot out in another one loaded into sky (Nov 15)"""
     source = SOURCE.read_text(encoding="utf-8")
     hook = source[source.index("int __fastcall MapSetHook("):]
     hook = hook[:hook.index("\n}\n")]
-    assert "Family(asked) == Family(g_pendingMapSet)" in hook and "g_mapSet(zone, edx, want)" in hook
+    assert "g_pendingZone == ZoneNumber()" in hook and "g_mapSet(zone, edx, want)" in hook
