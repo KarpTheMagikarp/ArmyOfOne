@@ -320,8 +320,11 @@ def test_it_only_saves_a_story_state_a_station_could_have():
     # the bar and the press go by the same answer
     assert "&& !Withheld();" in source
     assert "if (const char* why = Withheld()) Log(\"save pressed, but %s\", why);" in source
-    # station saves sanction, and only from the save screen
-    assert "if (!g_ourSave.load() && g_stateForFiles.load() == kStateSave) {\n        g_sanction = kStation;" in source
+    # station saves sanction: any slot write that isn't ours, since a terminal
+    # saves from its own menu and never passes through the save screen's state
+    hook = source[source.index("int __fastcall SaveWriteHook("):]
+    hook = hook[:hook.index("g_sanction = kStation;")]
+    assert "!g_ourSave.load() && slot >= 0 && SlotOf(reinterpret_cast<const char*>(self + 0x172)) == slot" in hook
 
 
 def test_a_floor_thats_gone_on_load_is_caught_whatever_moved_it():
@@ -356,7 +359,7 @@ def test_a_station_is_what_makes_a_state_safe_to_save_in():
     assert 'Sanctify("a station")' in tick and "state == kStateFieldIdle" in tick
     assert 'Sanctify("the station this load started at")' in tick
     assert "if (format >= 4) g_sanction = kOurs;" in source
-    assert '"xiii-save-anywhere 5\\nhash' in source
+    assert '"xiii-save-anywhere 6\\nhash' in source
     assert "g_readBytes" not in source
     # any read wipes the old state until the new field's settled
     assert "g_sanctioned.story = -1;" in tick
@@ -575,3 +578,26 @@ def test_a_load_waits_for_the_real_rebuild_before_putting_anything_back():
     assert "!StandIn(at)" in wait and "g_lastNoteAt" in wait
     check = source[source.index("void CheckWorld() {"):]
     assert check.index("g_pendingMapSet != MapSetName()") < check.index("Replay(e)")
+
+
+def test_only_what_a_script_asked_for_goes_in_the_journal():
+    """
+    the engine streams enemy groups in and out by itself and keeps its own
+    tally. Replaying one of its offs left a save station invisible until the
+    next load (Nov 15), so the hooks keep a call only when a native made it,
+    and a 5's journal, made before that, is never replayed
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    for hook in ("AreaOnHook", "AreaFadeHook", "AreaOffHook", "ObjectHook", "EncountHook"):
+        body = source[source.index(f"int __fastcall {hook}(") if "Encount" not in hook else source.index(f"int __cdecl {hook}("):]
+        body = body[:body.index("\n}\n")]
+        assert "FromScript(__builtin_return_address(0))" in body
+    assert "version >= 6 && !ReadWorld(" in source
+
+
+def test_a_spot_saved_in_a_streamed_in_map_set_loads_into_that_set():
+    """0304a is 0304 with the far end streamed in, and a station's load always asks for its own, so a spot out in the other one loaded into sky (Nov 15)"""
+    source = SOURCE.read_text(encoding="utf-8")
+    hook = source[source.index("int __fastcall MapSetHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "Family(asked) == Family(g_pendingMapSet)" in hook and "g_mapSet(zone, edx, want)" in hook

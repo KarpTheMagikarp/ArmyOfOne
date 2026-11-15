@@ -237,6 +237,14 @@ constexpr unsigned char kReleaseCharaHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x3
 constexpr unsigned char kTalkOnHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00};
 constexpr unsigned char kTalkOffHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0xA1, 0x84, 0x5A, 0x6E, 0x02};
 constexpr unsigned char kPathEdgeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x8B, 0x45, 0x08};
+// who's calling. The engine toggles areas on its own too, enemy groups
+// streaming in and out as you walk (0x5C88D0) and around fights (0x814B90),
+// and it keeps its own tally of those. A replay that forced one of them off
+// behind its back left it off for good: a save station that stayed invisible
+// until the next load (Nov 15). So only the natives count, the script
+// calling, plus the two spots a cutscene's own track plays a bg anim from
+constexpr DWORD kNativesFrom = 0x7BA4E0, kNativesTo = 0x7EBA00;
+constexpr DWORD kCutsceneBgAnimA = 0x71EF14, kCutsceneBgAnimB = 0x71F3AF;
 // the zone you're in, as the party database keeps it for the save (+0x1D68)
 constexpr DWORD kZoneNumber = 0x1D68;
 // the spawn sets the leader down this far behind the start marker, along its
@@ -372,6 +380,8 @@ std::atomic<int> g_stateForFiles{-1};
 std::atomic<bool> g_ourSave{false};
 // a slot whose spot a station save just made stale, for the log on the game thread
 std::atomic<int> g_staleSlot{-1};
+// the zone state a station save was written in, for the log
+std::atomic<int> g_stationSaveState{-1};
 
 // the load side: wait for the field to settle, warp, then watch the landing
 // a load of ours on its way into the field: the save's matrix, the marker it
@@ -743,51 +753,90 @@ RetryFn g_retry = nullptr;
 NativeFn g_createChara = nullptr, g_releaseChara = nullptr, g_talkOn = nullptr, g_talkOff = nullptr,
          g_pathEdge = nullptr;
 
+bool FromScript(void* returnAddress) {
+    const DWORD rva = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(returnAddress) - g_base);
+    return rva >= kNativesFrom && rva < kNativesTo;
+}
+
+// an empty name is one of a native's unused slots, which the engine skips
+bool Named(const char* name) { return name && name[0]; }
+
 int __fastcall AreaOnHook(void* scene, void* edx, const char* name, int flags) {
+    const bool kept = FromScript(__builtin_return_address(0)) && Named(name);
     const int out = g_areaOn(scene, edx, name, flags);
-    Note(Op::AreaOn, name, nullptr, flags, 0);
+    if (kept) Note(Op::AreaOn, name, nullptr, flags, 0);
     return out;
 }
 
 int __fastcall AreaFadeHook(void* scene, void* edx, const char* name, int arg) {
+    const bool kept = FromScript(__builtin_return_address(0)) && Named(name);
     const int out = g_areaFade(scene, edx, name, arg);
-    Note(Op::AreaFade, name, nullptr, arg, 0);
+    if (kept) Note(Op::AreaFade, name, nullptr, arg, 0);
     return out;
 }
 
 int __fastcall AreaOffHook(void* scene, void* edx, const char* name, int arg) {
+    const bool kept = FromScript(__builtin_return_address(0)) && Named(name);
     const int out = g_areaOff(scene, edx, name, arg);
-    Note(Op::AreaOff, name, nullptr, arg, 0);
+    if (kept) Note(Op::AreaOff, name, nullptr, arg, 0);
     return out;
 }
 
 int __fastcall ObjectHook(void* scene, void* edx, const char* name, int live) {
+    const bool kept = FromScript(__builtin_return_address(0)) && Named(name);
     const int out = g_object(scene, edx, name, live);
-    Note(Op::Object, name, nullptr, live, 0);
+    if (kept) Note(Op::Object, name, nullptr, live, 0);
     return out;
 }
 
 int __fastcall BgAnimHook(void* scene, void* edx, const char* object, int arg, const char* motion, int mode) {
+    void* from = __builtin_return_address(0);
+    const DWORD rva = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(from) - g_base);
+    const bool kept = (FromScript(from) || rva == kCutsceneBgAnimA || rva == kCutsceneBgAnimB) && Named(object);
     const int out = g_bgAnim(scene, edx, object, arg, motion, mode);
-    Note(Op::BgAnim, object, motion, arg, mode);
+    if (kept) Note(Op::BgAnim, object, motion, arg, mode);
     return out;
 }
 
 int __fastcall LayoutHook(void* scene, void* edx, const char* name, const void* set, int shown) {
+    const bool kept = Named(name);
     const int out = g_layout(scene, edx, name, set, shown);
     const bool fixed = reinterpret_cast<std::uintptr_t>(set) == g_base + kLayoutSetRva;
-    Note(Op::Layout, name, fixed ? nullptr : static_cast<const char*>(set), shown, fixed);
+    if (kept) Note(Op::Layout, name, fixed ? nullptr : static_cast<const char*>(set), shown, fixed);
     return out;
 }
 
 int __cdecl EncountHook(int on) {
+    const bool kept = FromScript(__builtin_return_address(0));
     const int out = g_encount(on);
-    Note(Op::Encount, nullptr, nullptr, on, 0);
+    if (kept) Note(Op::Encount, nullptr, nullptr, on, 0);
+    return out;
+}
+
+// mset_hgcr_0304a is the 0304 set with the far end streamed in: the engine
+// swaps between those as you walk. A station's load script always asks for
+// the one by the station, so a spot saved out in the other one loaded into
+// sky until a walk across a swap box fetched it back (Nov 15)
+std::string Family(const std::string& set) {
+    std::string out = set;
+    while (!out.empty() && out.back() >= 'a' && out.back() <= 'z') out.pop_back();
     return out;
 }
 
 int __fastcall MapSetHook(void* zone, void* edx, const char* name) {
     if (g_debug && name) Log("  world: map set %s asked for", Name(name).c_str());
+    // a load of ours, and the rebuild asking for a sibling of the set it was
+    // saved on: the saved one, so the field comes up the way it was
+    if (name && g_pendingWanted && g_pendingMapSet != "-") {
+        const std::string asked = Name(name);
+        if (asked != g_pendingMapSet && Family(asked) == Family(g_pendingMapSet) && g_pendingMapSet.size() < 16) {
+            char want[16]{};
+            std::memcpy(want, g_pendingMapSet.data(), g_pendingMapSet.size());
+            Log("the station's load asked for map set %s, loading %s instead, the one it was saved on",
+                asked.c_str(), g_pendingMapSet.c_str());
+            return g_mapSet(zone, edx, want);
+        }
+    }
     return g_mapSet(zone, edx, name);
 }
 
@@ -873,7 +922,7 @@ int ReplayMode(int mode) { return mode == 1 ? 5 : mode; }
 void Replay(const Entry& e) {
     void* scene = *reinterpret_cast<void**>(g_base + kSceneRva);
     if (!scene && e.op != Op::Encount) return;
-    // through the hooked entry, so the journal sees these like any other call
+    // the hooks only keep what a script asked for, so these go in by hand
     char a[16], b[16];
     std::memcpy(a, e.a, 16);
     std::memcpy(b, e.b, 16);
@@ -901,8 +950,9 @@ void Replay(const Entry& e) {
         reinterpret_cast<EncountFn>(g_base + kEncountRva)(e.i);
         break;
     default:
-        break;
+        return;
     }
+    Note(e.op, e.a[0] ? a : nullptr, e.b[0] ? b : nullptr, e.i, e.op == Op::BgAnim ? ReplayMode(e.j) : e.j);
 }
 
 // what the rebuild left different from the journal, so what a replay would
@@ -1246,9 +1296,11 @@ void WriteWhere(const SlotHash& save) {
         return;
     }
     const float* m = g_savedMatrix.m;
-    // 4: made with the full state guard, 5 adds the world journal. A 3 is from
-    // before the guard, and loading one never counts as a state a station could save
-    fprintf(file, "xiii-save-anywhere 5\nhash %016llx\npoint ", save.hash);
+    // 4: made with the full state guard, 6 adds the world journal. A 3 is from
+    // before the guard, and loading one never counts as a state a station
+    // could save. A 5's journal kept the engine's own area streaming too, and
+    // replaying that hid things, so a 5 loads with its spot and nothing put back
+    fprintf(file, "xiii-save-anywhere 6\nhash %016llx\npoint ", save.hash);
     for (unsigned char b : g_savedPoint.bytes) fprintf(file, "%02x", b);
     fprintf(file, "\npos %.6f %.6f %.6f\nmatrix", m[12], m[13], m[14]);
     for (float f : g_savedMatrix.m) fprintf(file, " %.9g", f);
@@ -1275,7 +1327,7 @@ bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& mat
     float pos[3]{};
     bool ok = fscanf_s(file, "xiii-save-anywhere %d hash %llx point %32s pos %f %f %f matrix", &version, &hash, hex,
                        static_cast<unsigned>(sizeof hex), &pos[0], &pos[1], &pos[2]) == 6 &&
-              version >= 3 && version <= 5 && std::strlen(hex) == 32;
+              version >= 3 && version <= 6 && std::strlen(hex) == 32;
     if (format) *format = version;
     for (int i = 0; ok && i < 16; ++i) ok = fscanf_s(file, "%f", &matrix.m[i]) == 1 && std::isfinite(matrix.m[i]);
     // older files have no trail, which only means the station's the fallback
@@ -1297,7 +1349,7 @@ bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& mat
     // and older ones no journal: the spot still works, there's just nothing to put back
     if (world) {
         world->clear();
-        if (ok && read == count && version >= 5 && !ReadWorld(file, *world, nullptr, &g_pendingMapSet))
+        if (ok && read == count && version >= 6 && !ReadWorld(file, *world, nullptr, &g_pendingMapSet))
             Log("slot %d's world journal didn't read back, loading without it", slot);
     }
     fclose(file);
@@ -1324,15 +1376,22 @@ int SlotOf(const char* name) {
 
 // the writer formats the slot's name from its own byte at +0x14A. Only our
 // save is recorded: a station's own save over a slot just leaves the old
-// .where behind, and the hash stops matching it
+// .where behind, and the hash stops matching it. Any other slot write is the
+// game's own save. Not just from the save screen's state: a terminal opens
+// it from its menu, and those never passed that test (Nov 15, no station
+// save was ever seen)
 int __fastcall SaveWriteHook(unsigned char* self, void* edx, int a, int b, const void* data, int size) {
-    if (!g_ourSave.load() && g_stateForFiles.load() == kStateSave) {
+    const int slot = static_cast<signed char>(self[0x14A]);
+    // a save slot by its own file name too (the save screen lists, so reads,
+    // every slot first), so nothing else the writer ever writes can pass for one
+    if (!g_ourSave.load() && slot >= 0 && SlotOf(reinterpret_cast<const char*>(self + 0x172)) == slot && data &&
+        size > 0) {
         g_sanction = kStation;
+        g_stationSaveState = g_stateForFiles.load();
         // a station save over a slot leaves that slot's spot matching nothing,
         // so it goes rather than piling up
-        const int slot = static_cast<signed char>(self[0x14A]);
-        if (slot >= 0 && DeleteFileA(WherePath(slot).c_str())) g_staleSlot = slot;
-        if (g_debug && slot >= 0) {
+        if (DeleteFileA(WherePath(slot).c_str())) g_staleSlot = slot;
+        if (g_debug) {
             FILE* file = nullptr;
             if (fopen_s(&file, StationWorldPath(slot).c_str(), "w") == 0 && file) {
                 WriteWorld(file, WorldNow(), g_worldZone, MapSetName());
@@ -1536,6 +1595,7 @@ void TryArm(int marker) {
     g_loadedSlot = load.slot;
     g_worldCheckWanted = true;
     g_pendingWanted = false;
+    g_pendingMapSet = "-";
 
     unsigned long long stored = 0;
     SavePoint point{}, now{};
@@ -1562,7 +1622,7 @@ void TryArm(int marker) {
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
         g_pending = std::move(world);
-        g_pendingWanted = format >= 5;
+        g_pendingWanted = format >= 6;
         Log("slot %d: start marker %d answers with %.2f %.2f %.2f, %u things to check the field for once it's up",
             load.slot, marker, saved.m[12], saved.m[13], saved.m[14], static_cast<unsigned>(g_pending.size()));
     }
@@ -1925,6 +1985,7 @@ void Tick() {
     // settled for 2 s past the stand-in, the way the land check waits
     if (g_sanction != kNone && g_idleSince && now - g_idleSince > 2000) {
         if (g_sanction == kStation) {
+            Log("saved at a station (state %d)", g_stationSaveState.load());
             Moment("saved at a station");
             Sanctify("the last station save");
             g_sanction = kNone;
@@ -2328,7 +2389,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.24.1, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.24.2, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2368,7 +2429,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.24.1";
+    d.version = "0.24.2";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
