@@ -245,6 +245,8 @@ constexpr unsigned char kPathEdgeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0
 // calling, plus the two spots a cutscene's own track plays a bg anim from
 constexpr DWORD kNativesFrom = 0x7BA4E0, kNativesTo = 0x7EBA00;
 constexpr DWORD kCutsceneBgAnimA = 0x71EF14, kCutsceneBgAnimB = 0x71F3AF;
+// 99 save slots, and anything smaller than this isn't a whole save
+constexpr int kSlots = 99, kSaveMinBytes = 0x10000;
 // the zone you're in, as the party database keeps it for the save (+0x1D68)
 constexpr DWORD kZoneNumber = 0x1D68;
 // the spawn sets the leader down this far behind the start marker, along its
@@ -537,6 +539,7 @@ struct Progress {
 };
 
 Progress g_sanctioned;
+Progress g_sceneStart;
 // the first scene state seen since the last station, or -1
 int g_sceneSince = -1;
 // what makes a state one a station could save, so Save Anywhere may too:
@@ -672,6 +675,9 @@ std::string g_savedMapSet = "-";
 int g_worldLines = 0;
 // when the journal last saw a call, so a load can wait out the rebuild
 std::atomic<ULONGLONG> g_lastNoteAt{0};
+// every call the journal kept, ever, so a scene can tell whether it touched the field
+std::atomic<unsigned> g_notes{0};
+unsigned g_notesAtScene = 0;
 
 int ZoneNumber() {
     unsigned char* party = *g_party;
@@ -728,6 +734,7 @@ void Note(Op op, const char* a, const char* b, int i, int j) {
     g_world.push_back(e);
     LeaveCriticalSection(&g_worldLock);
     g_lastNoteAt = GetTickCount64();
+    ++g_notes;
     // a station load alone is a few dozen of these
     if (g_debug && g_worldLines < 4000) {
         ++g_worldLines;
@@ -1390,10 +1397,10 @@ int __fastcall SaveWriteHook(unsigned char* self, void* edx, int a, int b, const
         Log("slot write: slot %d, name \"%s\", %d bytes, state %d, ours %d, args %d %d", slot, name, size,
             g_stateForFiles.load(), g_ourSave.load() ? 1 : 0, a, b);
     }
-    // a save slot by its own file name too (the save screen lists, so reads,
-    // every slot first), so nothing else the writer ever writes can pass for one
-    if (!g_ourSave.load() && slot >= 0 && SlotOf(reinterpret_cast<const char*>(self + 0x172)) == slot && data &&
-        size > 0) {
+    // a whole save's worth of data into a real slot: a terminal writes from
+    // its own menu (state 14) with the name field still empty, so neither the
+    // state nor the name tells it apart (Nov 15). 300,080 bytes, same as ours
+    if (!g_ourSave.load() && slot >= 0 && slot < kSlots && data && size >= kSaveMinBytes) {
         g_sanction = kStation;
         g_stationSaveState = g_stateForFiles.load();
         // a station save over a slot leaves that slot's spot matching nothing,
@@ -1965,12 +1972,29 @@ void Tick() {
     }
     if (InScene(state) && g_sceneSince < 0 && g_sanctioned.story >= 0) {
         g_sceneSince = state;
+        g_notesAtScene = g_notes.load();
+        // against where it started, not the last station: a chest or a ledge
+        // jump on the way flips flags, and those were fine before the scene
+        ReadProgress(g_sceneStart);
         Log("scene (state %d), save anywhere waits for the next station", state);
     }
     if (InScene(state)) g_wasScene = true;
     else if (g_wasScene && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 500) {
         g_wasScene = false;
         Moment("back in free roam after a scene");
+        // a terminal's own menu is an event state too, so just using one
+        // turned Save off until you walked back into its area (Nov 15). A
+        // scene that left the story, every flag, every script variable, the
+        // zone's flags and the field itself exactly as they were is no scene
+        // as far as a save can tell
+        if (g_sceneSince >= 0) {
+            static Progress after;
+            ReadProgress(after);
+            if (g_notes.load() == g_notesAtScene && !Moved(after) && !Drifted(after, g_sceneStart)) {
+                Log("that scene (state %d) left everything as it was, save anywhere is back", g_sceneSince);
+                g_sceneSince = -1;
+            }
+        }
     }
     if (g_areaEntered.exchange(false) && state == kStateFieldIdle) {
         Moment("walked into a station's area");
@@ -2398,7 +2422,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.24.3, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.24.4, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2438,7 +2462,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.24.3";
+    d.version = "0.24.4";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

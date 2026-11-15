@@ -324,7 +324,7 @@ def test_it_only_saves_a_story_state_a_station_could_have():
     # saves from its own menu and never passes through the save screen's state
     hook = source[source.index("int __fastcall SaveWriteHook("):]
     hook = hook[:hook.index("g_sanction = kStation;")]
-    assert "!g_ourSave.load() && slot >= 0 && SlotOf(reinterpret_cast<const char*>(self + 0x172)) == slot" in hook
+    assert "!g_ourSave.load() && slot >= 0 && slot < kSlots && data && size >= kSaveMinBytes" in hook
 
 
 def test_a_floor_thats_gone_on_load_is_caught_whatever_moved_it():
@@ -601,3 +601,15 @@ def test_a_spot_loads_into_the_map_set_it_was_saved_in():
     hook = source[source.index("int __fastcall MapSetHook("):]
     hook = hook[:hook.index("\n}\n")]
     assert "g_pendingZone == ZoneNumber()" in hook and "g_mapSet(zone, edx, want)" in hook
+
+
+def test_a_scene_that_changed_nothing_doesnt_hold_save_back():
+    """
+    a terminal's own menu is an event state, so just using one turned Save
+    off until you walked back into its area (Nov 15). Only a scene that left
+    the story, flags, script variables, zone flags and the field untouched
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "g_notes.load() == g_notesAtScene && !Moved(after) && !Drifted(after, g_sceneStart)" in tick
