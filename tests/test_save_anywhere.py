@@ -491,3 +491,33 @@ def test_the_log_rotates_and_the_spots_folder_explains_itself():
     assert "1024 * 1024" in source and 'L".1"' in source
     assert "ExplainLocations();" in source[source.index("void WriteWhere("):]
     assert "Safe to delete" in source
+
+
+def test_restart_points_count_like_a_station():
+    """
+    White.doRestartSave is where the scripts write the snapshot game over's
+    Retry rebuilds the field from, so the designers already vouch for it the
+    way they do for a station. Chapter 3 has long stretches with a scene behind
+    you and no station ahead (Nov 14), so these let Save back on. Only if
+    nothing that persists moved between the point and free roam, and only in
+    the field it was set in
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kRestartSaveRva = 0x7E63D0;" in source
+    assert "{kRestartSaveRva, kRestartSaveHead, sizeof kRestartSaveHead}," in source
+    assert "reinterpret_cast<LPVOID>(&RestartSaveHook)" in source
+    hook = source[source.index("int __cdecl RestartSaveHook(void* vm) {"):]
+    hook = hook[:hook.index("\n}\n")]
+    # the original runs first, so the snapshot is written before we look
+    assert hook.index("g_restartSave(vm)") < hook.index("ReadProgress(g_restartAt)")
+    drifted = source[source.index("const char* Drifted("):]
+    drifted = drifted[:drifted.index("\n}\n")]
+    for field in ("story", "flags", "work", "zone"):
+        assert f"now.{field}" in drifted
+    # mid-sequence locks are on when a script sets the point, so they can't count
+    assert "now.ui" not in drifted and "now.menu" not in drifted
+    taken = source[source.index("if (state == kStateFieldIdle && g_restartPoint.exchange(false)) {"):]
+    taken = taken[:taken.index("\n    }\n")]
+    assert "Drifted(now, g_restartAt)" in taken and 'Sanctify("a restart point");' in taken
+    assert "g_idleSolid = false;\n        // a field change after the point means it's not this field's any more\n" \
+           "        g_restartPoint = false;" in source

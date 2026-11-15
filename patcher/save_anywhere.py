@@ -34,6 +34,7 @@ SITES = (
     ("save read", 0x439F30, 12),
     ("spawn marker", 0x304A80, 12),
     ("station area", 0x1BD1C0, 12),
+    ("restart point", 0x7E63D0, 14),
     ("start marker", 0x1D30D0, 12),
     ("story number", 0x76C750, 36),
     ("event flags", 0x768196, 13),

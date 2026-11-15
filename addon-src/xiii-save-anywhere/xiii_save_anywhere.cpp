@@ -138,6 +138,15 @@ constexpr DWORD kMarkerLookupRva = 0x304A80;
 // it's the moment the game itself would let you save
 constexpr DWORD kAreaEnterRva = 0x1BD1C0;
 constexpr unsigned char kAreaEnterHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20, 0xA1, 0x84, 0x5A, 0x6E, 0x02, 0x33};
+// White.doRestartSave's engine side, cdecl(vm), plain ret: a script sets the
+// save point and writes the restart snapshot that game over's Retry comes back
+// to. The only other writer of that snapshot is the new game start, so these
+// are the spots the designers marked as safe to rebuild a field from, same as
+// a station. The native table's names sit one entry off: this is the func on
+// doSave_l's row
+constexpr DWORD kRestartSaveRva = 0x7E63D0;
+constexpr unsigned char kRestartSaveHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00, 0xA1, 0x84, 0x5A,
+                                              0x6E, 0x02};
 constexpr unsigned char kMarkerLookupHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x44, 0x56, 0x89, 0x4D, 0xC0, 0xA1, 0x70};
 // the start marker itself: [[0x27ff068]+0x40] + 0x2CC, read under its lock
 constexpr DWORD kFieldStartRva = 0x23FF068;
@@ -229,6 +238,7 @@ using SaveWriteFn = int(__fastcall*)(unsigned char*, void*, int, int, const void
 using SaveReadFn = int(__fastcall*)(unsigned char*, void*, int, void*, int);
 using MarkerLookupFn = int(__fastcall*)(void*, void*, int, float*, float*, float*);
 using AreaEnterFn = void(__fastcall*)(void*, void*, void*, void*);
+using RestartSaveFn = int(__cdecl*)(void*);
 using StartMarkerFn = int(__fastcall*)(void*, void*);
 using TextThisFn = void(__fastcall*)(void*, void*);
 using PauseModeFn = void(__fastcall*)(unsigned char*, void*, int);
@@ -240,6 +250,7 @@ SaveWriteFn g_saveWrite = nullptr;
 SaveReadFn g_saveRead = nullptr;
 MarkerLookupFn g_markerLookup = nullptr;
 AreaEnterFn g_areaEnter = nullptr;
+RestartSaveFn g_restartSave = nullptr;
 StartMarkerFn g_startMarker = nullptr;
 void** g_fieldStart = nullptr;
 TextThisFn g_textCtor = nullptr, g_textDtor = nullptr;
@@ -477,6 +488,8 @@ int g_sceneSince = -1;
 enum SanctionKind { kNone, kLoad, kStation, kOurs };
 std::atomic<int> g_sanction{kNone};
 std::atomic<bool> g_areaEntered{false};
+// a restart point the scripts just set, and what the game held as they did
+std::atomic<bool> g_restartPoint{false};
 std::atomic<bool> g_startWanted{false};
 Vec4 g_startPos{};
 ULONGLONG g_idleSince = 0;
@@ -504,6 +517,17 @@ const char* Moved(const Progress& now) {
     if (now.story != g_sanctioned.story) return "the story moved on";
     if (now.ui != g_sanctioned.ui) return "a sequence has the field UI off";
     if (std::memcmp(now.menu, g_sanctioned.menu, sizeof now.menu) != 0) return "a sequence has the menus locked";
+    return nullptr;
+}
+
+// whether anything that persists moved between a restart point and free roam.
+// UI and menu locks are left out: a script sets the point mid-sequence with
+// both on, and the sanctioned snapshot gets them from free roam anyway
+const char* Drifted(const Progress& now, const Progress& then) {
+    if (now.story != then.story) return "the story moved on";
+    if (std::memcmp(now.flags, then.flags, sizeof now.flags) != 0) return "an event flag changed";
+    if (std::memcmp(now.work, then.work, sizeof now.work) != 0) return "a script variable changed";
+    if (std::memcmp(now.zone, then.zone, sizeof now.zone) != 0) return "a zone flag changed";
     return nullptr;
 }
 
@@ -1111,6 +1135,16 @@ void __fastcall AreaEnterHook(void* self, void* edx, void* a, void* point) {
     g_areaEntered = true;
 }
 
+Progress g_restartAt;
+
+int __cdecl RestartSaveHook(void* vm) {
+    const int out = g_restartSave(vm);
+    // scripts run on the game thread, so this is exactly what the snapshot holds
+    ReadProgress(g_restartAt);
+    g_restartPoint = true;
+    return out;
+}
+
 // keeps a state as the sanctioned one, saying so only when it's news
 void Sanctify(const char* where) {
     static Progress now;
@@ -1293,6 +1327,8 @@ void Tick() {
     if (state == 1 || state == 2) {
         g_trailCount = 0;
         g_idleSolid = false;
+        // a field change after the point means it's not this field's any more
+        g_restartPoint = false;
     }
     const Sample& prev = g_track[(g_trackNext + 15) % 16];
     if (state == kStateFieldIdle && now - prev.at >= 40) {
@@ -1328,6 +1364,17 @@ void Tick() {
         Sanctify("a station");
         // a load that started you inside the area is settled by this too
         if (g_sanction == kLoad) g_sanction = kNone;
+    }
+    // a restart point counts once you're back in free roam with nothing that
+    // persists moved since. A scene that ran on past the point and changed
+    // things means free roam isn't what the snapshot holds, so it waits
+    if (state == kStateFieldIdle && g_restartPoint.exchange(false)) {
+        static Progress now;
+        ReadProgress(now);
+        if (const char* why = Drifted(now, g_restartAt))
+            Log("restart point at story %d, but %s before free roam, not taking it", g_restartAt.story, why);
+        else
+            Sanctify("a restart point");
     }
     // whatever was sanctioned before belongs to the field that's gone
     if (g_sanction == kLoad || g_sanction == kOurs) g_sanctioned.story = -1;
@@ -1632,6 +1679,7 @@ bool Verify() {
         {kSaveReadRva, kSaveReadHead, sizeof kSaveReadHead},
         {kMarkerLookupRva, kMarkerLookupHead, sizeof kMarkerLookupHead},
         {kAreaEnterRva, kAreaEnterHead, sizeof kAreaEnterHead},
+        {kRestartSaveRva, kRestartSaveHead, sizeof kRestartSaveHead},
         {kStartMarkerRva, kStartMarkerHead, sizeof kStartMarkerHead},
         {kStoryRva, kStoryHead, sizeof kStoryHead},
         {kEventFlagRva, kEventFlagHead, sizeof kEventFlagHead},
@@ -1692,7 +1740,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.22, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.23, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -1706,6 +1754,8 @@ DWORD WINAPI Worker(LPVOID) {
               reinterpret_cast<LPVOID*>(&g_markerLookup)) ||
         !Hook(reinterpret_cast<LPVOID>(g_base + kAreaEnterRva), reinterpret_cast<LPVOID>(&AreaEnterHook),
               reinterpret_cast<LPVOID*>(&g_areaEnter)) ||
+        !Hook(reinterpret_cast<LPVOID>(g_base + kRestartSaveRva), reinterpret_cast<LPVOID>(&RestartSaveHook),
+              reinterpret_cast<LPVOID*>(&g_restartSave)) ||
         !Hook(reinterpret_cast<LPVOID>(g_base + kPadUpdateRva), reinterpret_cast<LPVOID>(&PadUpdateHook),
               reinterpret_cast<LPVOID*>(&g_padUpdate)) ||
         !Hook(reinterpret_cast<LPVOID>(g_base + kPauseModeRva), reinterpret_cast<LPVOID>(&PauseModeHook),
@@ -1729,7 +1779,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.22";
+    d.version = "0.23";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
