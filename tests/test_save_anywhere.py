@@ -356,7 +356,7 @@ def test_a_station_is_what_makes_a_state_safe_to_save_in():
     assert 'Sanctify("a station")' in tick and "state == kStateFieldIdle" in tick
     assert 'Sanctify("the station this load started at")' in tick
     assert "if (format >= 4) g_sanction = kOurs;" in source
-    assert '"xiii-save-anywhere 4\\nhash' in source
+    assert '"xiii-save-anywhere 5\\nhash' in source
     assert "g_readBytes" not in source
     # any read wipes the old state until the new field's settled
     assert "g_sanctioned.story = -1;" in tick
@@ -521,3 +521,41 @@ def test_restart_points_count_like_a_station():
     assert "Drifted(now, g_restartAt)" in taken and 'Sanctify("a restart point");' in taken
     assert "g_idleSolid = false;\n        // a field change after the point means it's not this field's any more\n" \
            "        g_restartPoint = false;" in source
+
+
+def test_what_the_scripts_did_to_the_field_goes_with_the_save():
+    """
+    a save keeps the party, not the field: which areas are on, which boxes are
+    live, where a door's animation stopped. The station's load script rebuilds
+    those from its own side of the story, and the zone scripts show most of
+    what an event turns on afterwards is never in one (Nov 15). So the engine
+    end of every one of those calls is journalled, the journal goes in the
+    .where, and a load of ours puts back whatever the rebuild left different
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    for site in ("kAreaOnRva", "kAreaFadeRva", "kAreaOffRva", "kObjectRva", "kBgAnimRva", "kLayoutRva",
+                 "kEncountRva"):
+        assert f"{{{site}, " in source
+    assert "WriteWorld(file, g_savedWorld, g_savedZone, g_savedMapSet);" in source
+    check = source[source.index("void CheckWorld() {"):]
+    check = check[:check.index("\n}\n")]
+    assert "Missing(g_pending, have, &other)" in check and "Replay(e)" in check
+    replay = source[source.index("void Replay(const Entry& e) {"):]
+    replay = replay[:replay.index("\n}\n")]
+    # back through the hooked entries, so the journal sees the replay too
+    assert "g_base + kAreaOnRva" in replay and "g_areaOn(" not in replay
+    # a door that was opening comes back open, not opening again
+    assert "int ReplayMode(int mode) { return mode == 1 ? 5 : mode; }" in source
+
+
+def test_the_journal_only_ever_holds_the_field_youre_in():
+    """a load, a retry and a new zone each start a field from nothing, and a journal from before would put back a world that's gone"""
+    source = SOURCE.read_text(encoding="utf-8")
+    read = source[source.index("int __fastcall SaveReadHook("):]
+    read = read[:read.index("\n}\n")]
+    assert 'ForgetWorld("a load");' in read
+    retry = source[source.index("int __fastcall RetryHook("):]
+    assert retry.index('ForgetWorld("retry");') < retry.index("g_retry(self, edx)")
+    note = source[source.index("void Note(Op op,"):]
+    note = note[:note.index("\n}\n")]
+    assert 'if (zone != g_worldZone) ForgetWorld("a new zone");' in note

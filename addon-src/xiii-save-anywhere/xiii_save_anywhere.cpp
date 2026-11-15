@@ -43,6 +43,7 @@
 #include <cstring>
 #include <cwctype>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -196,6 +197,48 @@ constexpr unsigned char kFieldUiHead[] = {0x8B, 0x45, 0xEC, 0x8B, 0x48, 0x1C, 0x
 constexpr DWORD kMenuMaskRva = 0x75D8CD, kMenuMaskBitsRva = 0x75D901;
 constexpr unsigned char kMenuMaskHead[] = {0xA1, 0xF4, 0xB1, 0x82, 0x02};
 constexpr unsigned char kMenuMaskBitsHead[] = {0x23, 0x84, 0x91, 0x84, 0x01, 0x00, 0x00};
+// what scripts do to the field itself, at the engine end, so whatever ran the
+// native (a zone script, a cutscene's own track) goes through here. Every one
+// takes the target as a 16-byte name, built from the script's string. All but
+// the encounter switch are thiscall on the scene, [0x2801b70]
+constexpr DWORD kSceneRva = 0x2401B70;
+constexpr DWORD kAreaOnRva = 0x3036E0;          // (name, flags), what every activateArea flavour calls
+constexpr unsigned char kAreaOnHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08, 0x89, 0x4D, 0xF8};
+constexpr DWORD kAreaFadeRva = 0x302950;        // (name, ?), activateAreaAlpha
+constexpr unsigned char kAreaFadeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x40, 0xA1, 0x84, 0x5A, 0x6E, 0x02};
+constexpr DWORD kAreaOffRva = 0x303F40;         // (name, 1)
+constexpr unsigned char kAreaOffHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08, 0x89, 0x4D, 0xF8};
+constexpr DWORD kObjectRva = 0x2FBC70;          // (name, live), validateObject and invalidateObject
+constexpr unsigned char kObjectHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x34, 0x89, 0x4D, 0xE8};
+// (object, ?, motion, mode), ret 0x10. The script's mode with bit 0 set to
+// play, 0 to stop. Scripts use 4 for "at the last frame", 8 to loop
+constexpr DWORD kBgAnimRva = 0x2F9750;
+constexpr unsigned char kBgAnimHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xD8, 0x0C, 0x00, 0x00};
+// (name, set, shown), ret 0xC: show/hideLayoutInstance pass the fixed layout
+// set at [0x2802b98] as set, show/hideBgModel a second name
+constexpr DWORD kLayoutRva = 0x2F8DD0, kLayoutSetRva = 0x2402B98;
+constexpr unsigned char kLayoutHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x40, 0xA1, 0x84, 0x5A, 0x6E, 0x02};
+constexpr DWORD kEncountRva = 0x1B0210;         // cdecl(on), Field.enableEncount
+constexpr unsigned char kEncountHead[] = {0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x08, 0x50};
+// a map set asked for: thiscall on the zone (name), Resource.loadBg and a
+// cutscene's own loads both. The name in play is [[0x2731238]+0xA28]
+constexpr DWORD kMapSetRva = 0x40BC20, kMapSetHolderRva = 0x2331238, kMapSetName = 0xA28;
+constexpr unsigned char kMapSetHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x20, 0x89, 0x4D, 0xE4};
+// game over's Retry: rebuilds the field from the restart snapshot, thiscall()
+constexpr DWORD kRetryRva = 0x40BA30;
+constexpr unsigned char kRetryHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x34, 0x89, 0x4D, 0xCC};
+// natives that change the field in ways the journal can't put back yet, kept
+// so the log says when they happen. cdecl(vm), the args in 8-byte slots from
+// [vm+0x114]: a type, then the value, a char* for a string
+constexpr DWORD kCreateCharaRva = 0x7CC290, kReleaseCharaRva = 0x7CC4F0, kTalkOnRva = 0x7CC580,
+                kTalkOffRva = 0x7CC690, kPathEdgeRva = 0x7E1050;
+constexpr unsigned char kCreateCharaHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0xD0, 0x00, 0x00, 0x00};
+constexpr unsigned char kReleaseCharaHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0xA1, 0x84, 0x5A, 0x6E, 0x02};
+constexpr unsigned char kTalkOnHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00};
+constexpr unsigned char kTalkOffHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0xA1, 0x84, 0x5A, 0x6E, 0x02};
+constexpr unsigned char kPathEdgeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x8B, 0x45, 0x08};
+// the zone you're in, as the party database keeps it for the save (+0x1D68)
+constexpr DWORD kZoneNumber = 0x1D68;
 // the spawn sets the leader down this far behind the start marker, along its
 // third row (measured the same in every zone tried), so ours answers that
 // much ahead of the spot and the leader lands on it
@@ -548,6 +591,343 @@ void LogProgress(const char* when, const Progress& now) {
         now.zone[0], now.zone[1], g_sanctioned.zone[0], g_sanctioned.zone[1], now.ui, now.menu[0], now.menu[1]);
 }
 
+// The world journal. A save keeps the party, so the story, flags and items
+// all come back, but none of what the scripts did to the field: which areas
+// are on (enemy groups, NPCs, walls), which boxes are live, where each door
+// or bridge animation stopped, which layout pieces show. A load rebuilds
+// those from the station's own load script, which only knows the station's
+// side of the story. So every one of those calls since the field started is
+// kept here, the latest per target, and goes in the .where with the spot.
+// Loading puts back whatever the rebuild didn't, through the same calls
+enum class Op : unsigned char { AreaOn, AreaFade, AreaOff, Object, BgAnim, Layout, Encount, Chara, Talk, Edge };
+constexpr const char* kOpNames[] = {"area on", "area fade in", "area off", "box", "bg anim",
+                                    "layout", "encounters", "chara", "talk", "path edge"};
+
+struct Entry {
+    Op op = Op::AreaOn;
+    char a[16]{};  // the target: area, box, bg object, layout piece, chara
+    char b[16]{};  // a bg anim's motion, a bg model's second name
+    int i = 0;     // flags, live, shown, on
+    int j = 0;     // a bg anim's mode, or 1 when a layout's set is the fixed one
+};
+
+int Kind(Op op) {
+    switch (op) {
+    case Op::AreaOn: case Op::AreaFade: case Op::AreaOff: return 0;
+    case Op::Object: return 1;
+    case Op::BgAnim: return 2;
+    case Op::Layout: return 3;
+    case Op::Encount: return 4;
+    default: return 5 + static_cast<int>(op);
+    }
+}
+
+bool SameTarget(const Entry& x, const Entry& y) {
+    if (Kind(x.op) != Kind(y.op)) return false;
+    if (x.op == Op::Encount) return true;
+    if (std::memcmp(x.a, y.a, 16) != 0) return false;
+    return x.op != Op::Layout || (x.j == y.j && std::memcmp(x.b, y.b, 16) == 0);
+}
+
+bool SameEffect(const Entry& x, const Entry& y) {
+    return x.op == y.op && SameTarget(x, y) && x.i == y.i && x.j == y.j && std::memcmp(x.b, y.b, 16) == 0;
+}
+
+// what can be put back: the rest is only kept so the log can say it happened
+bool Replayable(Op op) { return Kind(op) <= 4; }
+
+// the game thread writes it, the save writer and reader may not run there
+CRITICAL_SECTION g_worldLock;
+std::vector<Entry> g_world;
+int g_worldZone = -1;
+// a load of ours: what the save's journal says, put back once the rebuild's done
+std::vector<Entry> g_pending;
+bool g_pendingWanted = false;
+// with Debug on, a station save keeps its journal too, in debug\, so loading
+// it can say how much of that world the game's own rebuild brought back
+int g_loadedSlot = -1;
+bool g_worldCheckWanted = false;
+// the journal as a save of ours was asked for, for its .where
+std::vector<Entry> g_savedWorld;
+int g_savedZone = -1;
+std::string g_savedMapSet = "-";
+int g_worldLines = 0;
+
+int ZoneNumber() {
+    unsigned char* party = *g_party;
+    return party ? *reinterpret_cast<int*>(party + kZoneNumber) : -1;
+}
+
+std::string Name(const char* raw) {
+    std::string out(raw, strnlen(raw, 16));
+    return out.empty() ? "-" : out;
+}
+
+void Describe(const Entry& e, char* out, size_t size) {
+    switch (e.op) {
+    case Op::BgAnim:
+        std::snprintf(out, size, "%s %s %s (%d, mode %d)", kOpNames[static_cast<int>(e.op)], Name(e.a).c_str(),
+                      Name(e.b).c_str(), e.i, e.j);
+        break;
+    case Op::Layout:
+        std::snprintf(out, size, "%s %s%s%s %s", kOpNames[static_cast<int>(e.op)], Name(e.a).c_str(), e.j ? "" : " / ",
+                      e.j ? "" : Name(e.b).c_str(), e.i ? "shown" : "hidden");
+        break;
+    case Op::Encount:
+        std::snprintf(out, size, "%s %s", kOpNames[static_cast<int>(e.op)], e.i ? "on" : "off");
+        break;
+    default:
+        std::snprintf(out, size, "%s %s (%d)", kOpNames[static_cast<int>(e.op)], Name(e.a).c_str(), e.i);
+    }
+}
+
+// a field that's gone takes its journal with it. A new zone is caught here,
+// on its first call, since the party's zone number moves before it loads
+void ForgetWorld(const char* why) {
+    EnterCriticalSection(&g_worldLock);
+    const size_t had = g_world.size();
+    g_world.clear();
+    g_worldZone = ZoneNumber();
+    LeaveCriticalSection(&g_worldLock);
+    if (had) Trace("world journal cleared (%s), had %u", why, static_cast<unsigned>(had));
+}
+
+void Note(Op op, const char* a, const char* b, int i, int j) {
+    Entry e;
+    e.op = op;
+    if (a) std::memcpy(e.a, a, strnlen(a, 16));
+    if (b) std::memcpy(e.b, b, strnlen(b, 16));
+    e.i = i;
+    e.j = j;
+    const int zone = ZoneNumber();
+    if (zone != g_worldZone) ForgetWorld("a new zone");
+    EnterCriticalSection(&g_worldLock);
+    // latest last, so a replay runs them in the order they last changed
+    g_world.erase(std::remove_if(g_world.begin(), g_world.end(), [&](const Entry& x) { return SameTarget(x, e); }),
+                  g_world.end());
+    g_world.push_back(e);
+    LeaveCriticalSection(&g_worldLock);
+    // a station load alone is a few dozen of these
+    if (g_debug && g_worldLines < 4000) {
+        ++g_worldLines;
+        char text[96];
+        Describe(e, text, sizeof text);
+        Log("  world: %s", text);
+    }
+}
+
+using AreaFn = int(__fastcall*)(void*, void*, const char*, int);
+using BgAnimFn = int(__fastcall*)(void*, void*, const char*, int, const char*, int);
+using LayoutFn = int(__fastcall*)(void*, void*, const char*, const void*, int);
+using EncountFn = int(__cdecl*)(int);
+using MapSetFn = int(__fastcall*)(void*, void*, const char*);
+using RetryFn = int(__fastcall*)(void*, void*);
+using NativeFn = int(__cdecl*)(void*);
+
+AreaFn g_areaOn = nullptr, g_areaFade = nullptr, g_areaOff = nullptr, g_object = nullptr;
+BgAnimFn g_bgAnim = nullptr;
+LayoutFn g_layout = nullptr;
+EncountFn g_encount = nullptr;
+MapSetFn g_mapSet = nullptr;
+RetryFn g_retry = nullptr;
+NativeFn g_createChara = nullptr, g_releaseChara = nullptr, g_talkOn = nullptr, g_talkOff = nullptr,
+         g_pathEdge = nullptr;
+
+int __fastcall AreaOnHook(void* scene, void* edx, const char* name, int flags) {
+    const int out = g_areaOn(scene, edx, name, flags);
+    Note(Op::AreaOn, name, nullptr, flags, 0);
+    return out;
+}
+
+int __fastcall AreaFadeHook(void* scene, void* edx, const char* name, int arg) {
+    const int out = g_areaFade(scene, edx, name, arg);
+    Note(Op::AreaFade, name, nullptr, arg, 0);
+    return out;
+}
+
+int __fastcall AreaOffHook(void* scene, void* edx, const char* name, int arg) {
+    const int out = g_areaOff(scene, edx, name, arg);
+    Note(Op::AreaOff, name, nullptr, arg, 0);
+    return out;
+}
+
+int __fastcall ObjectHook(void* scene, void* edx, const char* name, int live) {
+    const int out = g_object(scene, edx, name, live);
+    Note(Op::Object, name, nullptr, live, 0);
+    return out;
+}
+
+int __fastcall BgAnimHook(void* scene, void* edx, const char* object, int arg, const char* motion, int mode) {
+    const int out = g_bgAnim(scene, edx, object, arg, motion, mode);
+    Note(Op::BgAnim, object, motion, arg, mode);
+    return out;
+}
+
+int __fastcall LayoutHook(void* scene, void* edx, const char* name, const void* set, int shown) {
+    const int out = g_layout(scene, edx, name, set, shown);
+    const bool fixed = reinterpret_cast<std::uintptr_t>(set) == g_base + kLayoutSetRva;
+    Note(Op::Layout, name, fixed ? nullptr : static_cast<const char*>(set), shown, fixed);
+    return out;
+}
+
+int __cdecl EncountHook(int on) {
+    const int out = g_encount(on);
+    Note(Op::Encount, nullptr, nullptr, on, 0);
+    return out;
+}
+
+int __fastcall MapSetHook(void* zone, void* edx, const char* name) {
+    if (g_debug && name) Log("  world: map set %s asked for", Name(name).c_str());
+    return g_mapSet(zone, edx, name);
+}
+
+int __fastcall RetryHook(void* self, void* edx) {
+    ForgetWorld("retry");
+    return g_retry(self, edx);
+}
+
+// a native's string arg, if that slot holds a readable one
+const char* SlotText(const unsigned char* slot) {
+    const char* text = *reinterpret_cast<const char* const*>(slot + 4);
+    MEMORY_BASIC_INFORMATION info{};
+    if (!text || !VirtualQuery(text, &info, sizeof info) || info.State != MEM_COMMIT ||
+        (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !(info.Protect & 0xEE))
+        return nullptr;
+    for (int k = 0; k < 16 && text[k]; ++k)
+        if (text[k] < 0x20 || text[k] > 0x7E) return nullptr;
+    return text;
+}
+
+void NoteNative(Op op, void* vm, bool on) {
+    auto* slots = vm ? *reinterpret_cast<unsigned char**>(static_cast<unsigned char*>(vm) + 0x114) : nullptr;
+    const char* first = nullptr;
+    char raw[160]{};
+    int at = 0;
+    // which slot is which isn't pinned down for these yet, so the log gets four
+    for (int k = 0; slots && k < 4 && at < static_cast<int>(sizeof raw) - 40; ++k) {
+        const unsigned char* slot = slots + k * 8;
+        const unsigned type = *reinterpret_cast<const unsigned short*>(slot);
+        if (const char* text = SlotText(slot)) {
+            if (!first) first = text;
+            at += std::snprintf(raw + at, sizeof raw - at, " [%u \"%.16s\"]", type, text);
+        } else {
+            at += std::snprintf(raw + at, sizeof raw - at, " [%u %#lx]", type,
+                                *reinterpret_cast<const unsigned long*>(slot + 4));
+        }
+    }
+    Note(op, first, nullptr, on, 0);
+    Trace("  world: %s %s, slots%s", kOpNames[static_cast<int>(op)], on ? "set" : "cleared", raw);
+}
+
+int __cdecl CreateCharaHook(void* vm) {
+    NoteNative(Op::Chara, vm, true);
+    return g_createChara(vm);
+}
+
+int __cdecl ReleaseCharaHook(void* vm) {
+    NoteNative(Op::Chara, vm, false);
+    return g_releaseChara(vm);
+}
+
+int __cdecl TalkOnHook(void* vm) {
+    NoteNative(Op::Talk, vm, true);
+    return g_talkOn(vm);
+}
+
+int __cdecl TalkOffHook(void* vm) {
+    NoteNative(Op::Talk, vm, false);
+    return g_talkOff(vm);
+}
+
+int __cdecl PathEdgeHook(void* vm) {
+    NoteNative(Op::Edge, vm, true);
+    return g_pathEdge(vm);
+}
+
+std::string MapSetName() {
+    auto* holder = *reinterpret_cast<unsigned char**>(g_base + kMapSetHolderRva);
+    return holder ? Name(reinterpret_cast<const char*>(holder + kMapSetName)) : "-";
+}
+
+std::vector<Entry> WorldNow() {
+    EnterCriticalSection(&g_worldLock);
+    std::vector<Entry> out = g_world;
+    LeaveCriticalSection(&g_worldLock);
+    return out;
+}
+
+// a bg anim that was playing through once comes back at its last frame: the
+// door that was opening is open. Looping ones loop, the rest replay as made
+int ReplayMode(int mode) { return mode == 1 ? 5 : mode; }
+
+void Replay(const Entry& e) {
+    void* scene = *reinterpret_cast<void**>(g_base + kSceneRva);
+    if (!scene && e.op != Op::Encount) return;
+    // through the hooked entry, so the journal sees these like any other call
+    char a[16], b[16];
+    std::memcpy(a, e.a, 16);
+    std::memcpy(b, e.b, 16);
+    switch (e.op) {
+    case Op::AreaOn:
+        reinterpret_cast<AreaFn>(g_base + kAreaOnRva)(scene, nullptr, a, e.i);
+        break;
+    case Op::AreaFade:
+        reinterpret_cast<AreaFn>(g_base + kAreaFadeRva)(scene, nullptr, a, e.i);
+        break;
+    case Op::AreaOff:
+        reinterpret_cast<AreaFn>(g_base + kAreaOffRva)(scene, nullptr, a, e.i);
+        break;
+    case Op::Object:
+        reinterpret_cast<AreaFn>(g_base + kObjectRva)(scene, nullptr, a, e.i);
+        break;
+    case Op::BgAnim:
+        reinterpret_cast<BgAnimFn>(g_base + kBgAnimRva)(scene, nullptr, a, e.i, b, ReplayMode(e.j));
+        break;
+    case Op::Layout:
+        reinterpret_cast<LayoutFn>(g_base + kLayoutRva)(scene, nullptr, a,
+                                                        e.j ? reinterpret_cast<const void*>(g_base + kLayoutSetRva) : b, e.i);
+        break;
+    case Op::Encount:
+        reinterpret_cast<EncountFn>(g_base + kEncountRva)(e.i);
+        break;
+    default:
+        break;
+    }
+}
+
+// what the rebuild left different from the journal, so what a replay would
+// put back. Only targets the journal knows: whatever else the station's load
+// script turned on, the game turned on at a station too
+std::vector<Entry> Missing(const std::vector<Entry>& want, const std::vector<Entry>& have, int* other) {
+    std::vector<Entry> out;
+    if (other) *other = 0;
+    for (const Entry& w : want) {
+        if (!Replayable(w.op)) {
+            if (other) ++*other;
+            continue;
+        }
+        auto it = std::find_if(have.begin(), have.end(), [&](const Entry& h) { return SameTarget(h, w); });
+        if (it == have.end() || !SameEffect(*it, w)) out.push_back(w);
+    }
+    return out;
+}
+
+void LogMissing(const char* what, const std::vector<Entry>& missing, int other) {
+    int counts[5]{};
+    for (const Entry& e : missing) ++counts[Kind(e.op)];
+    Log("%s: %u differ from the rebuild (areas %d, boxes %d, bg anims %d, layout %d, encounters %d), %d that can't "
+        "be put back", what, static_cast<unsigned>(missing.size()), counts[0], counts[1], counts[2], counts[3],
+        counts[4], other);
+    int shown = 0;
+    for (const Entry& e : missing) {
+        if (!g_debug && shown >= 12) break;
+        char text[96];
+        Describe(e, text, sizeof text);
+        Log("  %s", text);
+        ++shown;
+    }
+}
+
 // the leader's track over the last moment in free roam, sampled every 40 ms
 struct Sample {
     ULONGLONG at;
@@ -765,6 +1145,12 @@ void ExplainLocations() {
     fclose(file);
 }
 
+std::string StationWorldPath(int slot) {
+    char name[32];
+    std::snprintf(name, sizeof name, "\\ff13-%02d.world", slot);
+    return Folder("debug") + name;
+}
+
 std::string WherePath(int slot) {
     char name[32];
     std::snprintf(name, sizeof name, "\\ff13-%02d.where", slot);
@@ -789,6 +1175,56 @@ void Tidy() {
     }
 }
 
+// names go as hex: they're the script's strings, and a space in one would
+// throw the reader off every line after it
+void WriteWorld(FILE* file, const std::vector<Entry>& world, int zone, const std::string& mapset) {
+    fprintf(file, "world %d %s %u\n", zone, mapset.c_str(), static_cast<unsigned>(world.size()));
+    for (const Entry& e : world) {
+        fprintf(file, "%d ", static_cast<int>(e.op));
+        for (char c : e.a) fprintf(file, "%02x", static_cast<unsigned char>(c));
+        fputc(' ', file);
+        for (char c : e.b) fprintf(file, "%02x", static_cast<unsigned char>(c));
+        fprintf(file, " %d %d\n", e.i, e.j);
+    }
+}
+
+bool Unhex(const char* hex, char* out) {
+    for (int k = 0; k < 16; ++k) {
+        unsigned byte = 0;
+        if (sscanf_s(hex + k * 2, "%2x", &byte) != 1) return false;
+        out[k] = static_cast<char>(byte);
+    }
+    return true;
+}
+
+// a journal that doesn't read back whole is dropped whole: half of one would
+// put back half a world
+bool ReadWorld(FILE* file, std::vector<Entry>& out, int* zone = nullptr) {
+    out.clear();
+    char mapset[32]{};
+    int z = -1;
+    unsigned count = 0;
+    if (fscanf_s(file, " world %d %31s %u", &z, mapset, static_cast<unsigned>(sizeof mapset), &count) != 3 ||
+        count > 100000)
+        return false;
+    if (zone) *zone = z;
+    for (unsigned n = 0; n < count; ++n) {
+        int op = 0;
+        char a[40]{}, b[40]{};
+        Entry e;
+        if (fscanf_s(file, "%d %39s %39s %d %d", &op, a, static_cast<unsigned>(sizeof a), b,
+                     static_cast<unsigned>(sizeof b), &e.i, &e.j) != 5 ||
+            op < 0 || op > static_cast<int>(Op::Edge) || std::strlen(a) != 32 || std::strlen(b) != 32 ||
+            !Unhex(a, e.a) || !Unhex(b, e.b)) {
+            out.clear();
+            return false;
+        }
+        e.op = static_cast<Op>(op);
+        out.push_back(e);
+    }
+    return true;
+}
+
 void WriteWhere(const SlotHash& save) {
     ExplainLocations();
     FILE* file = nullptr;
@@ -797,9 +1233,9 @@ void WriteWhere(const SlotHash& save) {
         return;
     }
     const float* m = g_savedMatrix.m;
-    // 4: made with the full state guard. A 3 is from before it, and loading one
-    // never counts as a state a station could save
-    fprintf(file, "xiii-save-anywhere 4\nhash %016llx\npoint ", save.hash);
+    // 4: made with the full state guard, 5 adds the world journal. A 3 is from
+    // before the guard, and loading one never counts as a state a station could save
+    fprintf(file, "xiii-save-anywhere 5\nhash %016llx\npoint ", save.hash);
     for (unsigned char b : g_savedPoint.bytes) fprintf(file, "%02x", b);
     fprintf(file, "\npos %.6f %.6f %.6f\nmatrix", m[12], m[13], m[14]);
     for (float f : g_savedMatrix.m) fprintf(file, " %.9g", f);
@@ -807,15 +1243,17 @@ void WriteWhere(const SlotHash& save) {
     for (int i = 0; i < g_savedTrailCount; ++i)
         fprintf(file, " %.6f %.6f %.6f", g_savedTrail[i].v[0], g_savedTrail[i].v[1], g_savedTrail[i].v[2]);
     fprintf(file, "\n");
+    WriteWorld(file, g_savedWorld, g_savedZone, g_savedMapSet);
     fclose(file);
-    Log("saved slot %d at %.2f %.2f %.2f", save.slot, m[12], m[13], m[14]);
+    Log("saved slot %d at %.2f %.2f %.2f, %u things the scripts did to the field kept with it", save.slot, m[12],
+        m[13], m[14], static_cast<unsigned>(g_savedWorld.size()));
     static Progress savedAt;
     ReadProgress(savedAt);
     LogProgress("  saved with", savedAt);
 }
 
 bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& matrix, int* format = nullptr,
-               Vec4* trail = nullptr, int* trailCount = nullptr) {
+               Vec4* trail = nullptr, int* trailCount = nullptr, std::vector<Entry>* world = nullptr) {
     FILE* file = nullptr;
     if (fopen_s(&file, WherePath(slot).c_str(), "r") != 0 || !file) return false;
     char hex[40]{};
@@ -823,24 +1261,30 @@ bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& mat
     float pos[3]{};
     bool ok = fscanf_s(file, "xiii-save-anywhere %d hash %llx point %32s pos %f %f %f matrix", &version, &hash, hex,
                        static_cast<unsigned>(sizeof hex), &pos[0], &pos[1], &pos[2]) == 6 &&
-              (version == 3 || version == 4) && std::strlen(hex) == 32;
+              version >= 3 && version <= 5 && std::strlen(hex) == 32;
     if (format) *format = version;
     for (int i = 0; ok && i < 16; ++i) ok = fscanf_s(file, "%f", &matrix.m[i]) == 1 && std::isfinite(matrix.m[i]);
     // older files have no trail, which only means the station's the fallback
-    int count = 0;
-    if (ok && trail && trailCount && fscanf_s(file, " trail %d", &count) == 1 && count > 0 && count <= kTrailLength) {
-        int read = 0;
+    Vec4 steps[kTrailLength]{};
+    int count = 0, read = 0;
+    if (ok && fscanf_s(file, " trail %d", &count) == 1 && count >= 0 && count <= kTrailLength) {
         for (; read < count; ++read) {
-            Vec4& v = trail[read];
-            v = {};
+            Vec4& v = steps[read];
             if (fscanf_s(file, "%f %f %f", &v.v[0], &v.v[1], &v.v[2]) != 3 || !std::isfinite(v.v[0]) ||
                 !std::isfinite(v.v[1]) || !std::isfinite(v.v[2]))
                 break;
             v.v[3] = 1.0f;
         }
+    }
+    if (trail && trailCount) {
+        std::copy(steps, steps + read, trail);
         *trailCount = read;
-    } else if (trailCount) {
-        *trailCount = 0;
+    }
+    // and older ones no journal: the spot still works, there's just nothing to put back
+    if (world) {
+        world->clear();
+        if (ok && read == count && version >= 5 && !ReadWorld(file, *world))
+            Log("slot %d's world journal didn't read back, loading without it", slot);
     }
     fclose(file);
     if (!ok) return false;
@@ -874,6 +1318,13 @@ int __fastcall SaveWriteHook(unsigned char* self, void* edx, int a, int b, const
         // so it goes rather than piling up
         const int slot = static_cast<signed char>(self[0x14A]);
         if (slot >= 0 && DeleteFileA(WherePath(slot).c_str())) g_staleSlot = slot;
+        if (g_debug && slot >= 0) {
+            FILE* file = nullptr;
+            if (fopen_s(&file, StationWorldPath(slot).c_str(), "w") == 0 && file) {
+                WriteWorld(file, WorldNow(), g_worldZone, MapSetName());
+                fclose(file);
+            }
+        }
     }
     if (g_ourSave.load() && data && size > 0) {
         const SlotHash save{static_cast<signed char>(self[0x14A]), Hash(data, size)};
@@ -899,6 +1350,8 @@ int __fastcall SaveReadHook(unsigned char* self, void* edx, int a, void* out, in
         LeaveCriticalSection(&g_fileLock);
         g_sanction = kLoad;
         g_startWanted = true;
+        // nothing's running behind the load screen, so whatever the journal held is gone
+        ForgetWorld("a load");
     }
     return result;
 }
@@ -969,6 +1422,9 @@ void StartSave() {
         return;
     }
     g_getSavePoint(g_savedPoint.bytes);
+    g_savedWorld = WorldNow();
+    g_savedZone = g_worldZone;
+    g_savedMapSet = MapSetName();
     std::copy(g_trail, g_trail + g_trailCount, g_savedTrail);
     g_savedTrailCount = g_trailCount;
     // the pause screen only closes through its own Resume, so it gets one:
@@ -1063,12 +1519,16 @@ void TryArm(int marker) {
     EnterCriticalSection(&g_fileLock);
     g_loaded = {};
     LeaveCriticalSection(&g_fileLock);
+    g_loadedSlot = load.slot;
+    g_worldCheckWanted = true;
+    g_pendingWanted = false;
 
     unsigned long long stored = 0;
     SavePoint point{}, now{};
     Matrix saved{};
     int format = 0;
-    if (!ReadWhere(load.slot, stored, point, saved, &format, g_fallback, &g_fallbackCount)) {
+    std::vector<Entry> world;
+    if (!ReadWhere(load.slot, stored, point, saved, &format, g_fallback, &g_fallbackCount, &world)) {
         Log("loaded slot %d, which has no spot of ours", load.slot);
     } else if (load.hash != stored) {
         Log("slot %d was saved over since its spot was kept, starting at the station", load.slot);
@@ -1087,8 +1547,10 @@ void TryArm(int marker) {
         g_fallbackAt = -1;
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
-        Log("slot %d: start marker %d answers with %.2f %.2f %.2f", load.slot, marker, saved.m[12], saved.m[13],
-            saved.m[14]);
+        g_pending = std::move(world);
+        g_pendingWanted = format >= 5;
+        Log("slot %d: start marker %d answers with %.2f %.2f %.2f, %u things to check the field for once it's up",
+            load.slot, marker, saved.m[12], saved.m[13], saved.m[14], static_cast<unsigned>(g_pending.size()));
     }
 }
 
@@ -1305,6 +1767,31 @@ const char* RawPress(bool& held) {
     return source;
 }
 
+// once a load's rebuild is done: a save of ours gets back whatever the
+// station's load script didn't do, and with Debug on a station save's load
+// says what the game's own rebuild missed, which is what this is all for
+void CheckWorld() {
+    const std::vector<Entry> have = WorldNow();
+    int other = 0;
+    if (g_pendingWanted) {
+        g_pendingWanted = false;
+        const std::vector<Entry> missing = Missing(g_pending, have, &other);
+        LogMissing("putting the field back the way it was saved", missing, other);
+        for (const Entry& e : missing) Replay(e);
+        g_pending.clear();
+        return;
+    }
+    if (!g_debug || g_loadedSlot < 0) return;
+    FILE* file = nullptr;
+    if (fopen_s(&file, StationWorldPath(g_loadedSlot).c_str(), "r") != 0 || !file) return;
+    std::vector<Entry> want;
+    int zone = -1;
+    const bool ok = ReadWorld(file, want, &zone);
+    fclose(file);
+    if (ok && zone == g_worldZone)
+        LogMissing("a station load, against what was live when it saved", Missing(want, have, &other), other);
+}
+
 unsigned char* g_pauseWidget = nullptr;
 ULONGLONG g_pauseSetAt = 0;
 int g_pauseLooks = 0;
@@ -1405,6 +1892,12 @@ void Tick() {
                 g_sanction = kNone;
             }
         }
+    }
+    // the station's load script runs before free roam does, so a moment of
+    // free roam means the rebuild's had its go
+    if (g_worldCheckWanted && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 300) {
+        g_worldCheckWanted = false;
+        CheckWorld();
     }
     if (state == kStateFieldPause && g_lastState != kStateFieldPause && g_phase == Phase::Idle && g_enabled) {
         if (const char* why = Withheld()) Log("save not offered: %s", why);
@@ -1688,6 +2181,20 @@ bool Verify() {
         {kMenuMaskBitsRva, kMenuMaskBitsHead, sizeof kMenuMaskBitsHead},
         {kWorkRva, kWorkHead, sizeof kWorkHead},
         {kZoneFlagRva, kZoneFlagHead, sizeof kZoneFlagHead},
+        {kAreaOnRva, kAreaOnHead, sizeof kAreaOnHead},
+        {kAreaFadeRva, kAreaFadeHead, sizeof kAreaFadeHead},
+        {kAreaOffRva, kAreaOffHead, sizeof kAreaOffHead},
+        {kObjectRva, kObjectHead, sizeof kObjectHead},
+        {kBgAnimRva, kBgAnimHead, sizeof kBgAnimHead},
+        {kLayoutRva, kLayoutHead, sizeof kLayoutHead},
+        {kEncountRva, kEncountHead, sizeof kEncountHead},
+        {kMapSetRva, kMapSetHead, sizeof kMapSetHead},
+        {kRetryRva, kRetryHead, sizeof kRetryHead},
+        {kCreateCharaRva, kCreateCharaHead, sizeof kCreateCharaHead},
+        {kReleaseCharaRva, kReleaseCharaHead, sizeof kReleaseCharaHead},
+        {kTalkOnRva, kTalkOnHead, sizeof kTalkOnHead},
+        {kTalkOffRva, kTalkOffHead, sizeof kTalkOffHead},
+        {kPathEdgeRva, kPathEdgeHead, sizeof kPathEdgeHead},
     };
     // SteamStub decrypts the code before the game's entry point, and NovaFix
     // loads us after that, but waiting on the bytes costs nothing if not
@@ -1728,6 +2235,23 @@ bool Hook(LPVOID target, LPVOID detour, LPVOID* original) {
     return MH_CreateHook(target, detour, original) == MH_OK && MH_EnableHook(target) == MH_OK;
 }
 
+template <typename Fn>
+bool HookAt(DWORD rva, Fn detour, Fn& original) {
+    return Hook(reinterpret_cast<LPVOID>(g_base + rva), reinterpret_cast<LPVOID>(detour),
+                reinterpret_cast<LPVOID*>(&original));
+}
+
+bool HookWorld() {
+    return HookAt(kAreaOnRva, &AreaOnHook, g_areaOn) && HookAt(kAreaFadeRva, &AreaFadeHook, g_areaFade) &&
+           HookAt(kAreaOffRva, &AreaOffHook, g_areaOff) && HookAt(kObjectRva, &ObjectHook, g_object) &&
+           HookAt(kBgAnimRva, &BgAnimHook, g_bgAnim) && HookAt(kLayoutRva, &LayoutHook, g_layout) &&
+           HookAt(kEncountRva, &EncountHook, g_encount) && HookAt(kMapSetRva, &MapSetHook, g_mapSet) &&
+           HookAt(kRetryRva, &RetryHook, g_retry) && HookAt(kCreateCharaRva, &CreateCharaHook, g_createChara) &&
+           HookAt(kReleaseCharaRva, &ReleaseCharaHook, g_releaseChara) &&
+           HookAt(kTalkOnRva, &TalkOnHook, g_talkOn) && HookAt(kTalkOffRva, &TalkOffHook, g_talkOff) &&
+           HookAt(kPathEdgeRva, &PathEdgeHook, g_pathEdge);
+}
+
 // the log appends every session, so past 1 MB the old one steps aside as .1
 // (replacing the one before it) and this session starts a fresh file
 void RotateLog() {
@@ -1740,7 +2264,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.23, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.24, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -1761,7 +2285,8 @@ DWORD WINAPI Worker(LPVOID) {
         !Hook(reinterpret_cast<LPVOID>(g_base + kPauseModeRva), reinterpret_cast<LPVOID>(&PauseModeHook),
               reinterpret_cast<LPVOID*>(&g_pauseMode)) ||
         !Hook(reinterpret_cast<LPVOID>(g_base + kTextSetIdRva), reinterpret_cast<LPVOID>(&TextSetIdHook),
-              reinterpret_cast<LPVOID*>(&g_textSetId))) {
+              reinterpret_cast<LPVOID*>(&g_textSetId)) ||
+        !HookWorld()) {
         // all or nothing: the input side without the save hooks would keep
         // spots it can never match to a slot
         MH_DisableHook(MH_ALL_HOOKS);
@@ -1779,7 +2304,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.23";
+    d.version = "0.24";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
@@ -1795,6 +2320,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(module);
     InitializeCriticalSection(&g_fileLock);
+    InitializeCriticalSection(&g_worldLock);
     wchar_t path[MAX_PATH]{};
     GetModuleFileNameW(module, path, MAX_PATH);
     g_dir = path;

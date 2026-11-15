@@ -43,6 +43,20 @@ SITES = (
     ("menu mask bits", 0x75D901, 7),
     ("script variables", 0x76807E, 16),
     ("zone flags", 0x7EB290, 47),
+    ("area on", 0x3036E0, 9),
+    ("area fade in", 0x302950, 11),
+    ("area off", 0x303F40, 9),
+    ("boxes", 0x2FBC70, 9),
+    ("bg anims", 0x2F9750, 9),
+    ("layout pieces", 0x2F8DD0, 11),
+    ("encounters", 0x1B0210, 7),
+    ("map set load", 0x40BC20, 9),
+    ("retry", 0x40BA30, 9),
+    ("chara create", 0x7CC290, 9),
+    ("chara release", 0x7CC4F0, 11),
+    ("talk set", 0x7CC580, 9),
+    ("talk clear", 0x7CC690, 11),
+    ("path edge", 0x7E1050, 9),
 )
 
 
