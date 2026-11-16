@@ -395,13 +395,13 @@ def test_it_never_writes_to_a_save():
 def test_it_only_acts_in_free_roam_and_its_pause_never_in_a_fight():
     """
     the numbers are the zone state table's (0x26A1728, states from entry 60):
-    3 FIELD_IDLE, 23 FIELD_PAUSE, 27 FIELD_PAUSE_WAIT, 60 SAVE. A battle pauses
-    into 24 and an event or live event into states of their own, so none of
-    them shows Save or takes the press
+    3 FIELD_IDLE, 23 FIELD_PAUSE, 27 FIELD_PAUSE_WAIT, 31 FIELD_PAUSE_END_WAIT,
+    60 SAVE. A battle pauses into 24 and an event or live event into states of
+    their own, so none of them shows Save or takes the press
     """
     source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr int kStateFieldIdle = 3, kStateFieldPause = 23, kStateFieldPauseWait = 27, kStateSave = 60;" \
-        in source
+    assert "constexpr int kStateFieldIdle = 3, kStateFieldPause = 23, kStateFieldPauseWait = 27, kStateFieldPauseEnd = 31,\n" \
+           "              kStateSave = 60;" in source
     fire = source.index("g_zoneFire(Zone(), nullptr, kTrgSaveReq);")
     assert "if (state == kStateFieldIdle) {" in source[fire - 600:fire]
     assert "if (state == kStateFieldPause && g_phase == Phase::Idle && g_enabled && (g_decorated || !g_prompt)" \
@@ -551,7 +551,7 @@ def test_what_the_scripts_did_to_the_field_goes_with_the_save():
     assert "WriteWorld(file, g_savedWorld, g_savedZone, g_savedMapSet);" in source
     check = source[source.index("void CheckWorld() {"):]
     check = check[:check.index("\n}\n")]
-    assert "Missing(g_pending, have, &other)" in check and "Replay(e)" in check
+    assert "Missing(g_pending, have, &other, boxes, g_realFrom)" in check and "Replay(e)" in check
     replay = source[source.index("void Replay(const Entry& e) {"):]
     replay = replay[:replay.index("\n}\n")]
     # back through the hooked entries, so the journal sees the replay too
@@ -592,16 +592,21 @@ def test_a_load_waits_for_the_real_rebuild_before_putting_anything_back():
 
 def test_only_what_a_script_asked_for_goes_in_the_journal():
     """
-    the engine streams enemy groups in and out by itself and keeps its own
-    tally. Replaying one of its offs left a save station invisible until the
-    next load (Nov 15), so the hooks keep a call only when a native made it,
-    and a 5's journal, made before that, is never replayed
+    the engine toggles areas around fights and refreshes enemy groups by itself
+    and keeps its own tally. Replaying one of its offs left a save station
+    invisible until the next load (Nov 15), so the hooks keep a call only when
+    a native made it, or for areas an area box, and a 5's journal, made before
+    that, is never replayed
     """
     source = SOURCE.read_text(encoding="utf-8")
-    for hook in ("AreaOnHook", "AreaFadeHook", "AreaOffHook", "ObjectHook", "EncountHook"):
+    for hook in ("AreaFadeHook", "ObjectHook", "EncountHook"):
         body = source[source.index(f"int __fastcall {hook}(") if "Encount" not in hook else source.index(f"int __cdecl {hook}("):]
         body = body[:body.index("\n}\n")]
         assert "FromScript(__builtin_return_address(0))" in body
+    for hook in ("AreaOnHook", "AreaOffHook"):
+        body = source[source.index(f"int __fastcall {hook}("):]
+        body = body[:body.index("\n}\n")]
+        assert "const bool kept = (FromScript(from) || box) && Named(name);" in body
     assert "version >= 6 && !ReadWorld(" in source
 
 
@@ -653,7 +658,11 @@ def test_a_ride_holds_save_back_till_shes_walked_off_it():
     tick = tick[:tick.index("\n}\n")]
     # sustained and steeper than 45, so stairs and a hop never latch
     assert "std::hypot(dx, dz) < std::fabs(stepDy)" in tick
-    assert "(g_runMs >= 600 && std::fabs(g_runDy) >= 0.75f) || std::fabs(g_runDy) >= 2.0f || carried" in tick
+    # longer than any jump, and being carried isn't one: judged every step it
+    # caught plain running round corners (Vile Peaks, Nov 16)
+    assert "if (g_runMs >= 1200 && std::fabs(g_runDy) >= 1.0f) {" in tick and "|| carried" not in tick
+    # a load settling her onto the spot isn't a ride
+    assert "if (g_landCheckAt) {\n                g_runDy = 0;" in tick
     # pauses, fights, scenes and teleports break a run but never clear the latch
     assert "dt <= 1000" in tick and "< 2.0f;" in tick
     # nothing on the ride goes on the trail
@@ -693,6 +702,8 @@ def test_a_save_of_ours_gets_its_field_back_even_when_its_spot_cant_be_used():
     check = source[source.index("void CheckWorld() {"):]
     check = check[:check.index("\n}\n")]
     assert "if (g_pendingZone != g_worldZone) {" in check and "MapSetName()" not in check
+    # only the area boxes' groups go by the map set, the one she came up on
+    assert "g_realSet == g_pendingMapSet" in check
     # and only the rebuild's own map set ask is ever swapped
     hook = source[source.index("int __fastcall MapSetHook("):]
     hook = hook[:hook.index("\n}\n")]
@@ -716,3 +727,55 @@ def test_charas_and_talk_reset_with_the_field_but_not_at_a_restart_point():
     sanctify = source[source.index("void Sanctify(const char* where, bool baseline = true) {"):]
     sanctify = sanctify[:sanctify.index("\n}\n")]
     assert sanctify.index("if (baseline) {") < sanctify.index("g_charaNet.clear();")
+
+
+def test_the_area_boxes_groups_come_back_with_the_spot():
+    """
+    the map data's area boxes (0x5C88D0, four groups, all on or all off) turn
+    on the next stretch of level's gr_fa group as you walk into it, and its
+    save station's terminal lives in that group. A load past the box starts at
+    a station before it, so with those calls left out the terminal ahead stood
+    invisible, solid and dead (Vile Peaks, Nov 16). They go in the journal
+    marked as a box's, and come back only at the spot, on the map set it was
+    saved on, and not over a box she's walked through since. If the load ends
+    up at the station after all, the station's own groups go back
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kAreaBoxFrom = 0x1C88D0, kAreaBoxTo = 0x1C93F8;" in source
+    on = source[source.index("int __fastcall AreaOnHook("):]
+    on = on[:on.index("\n}\n")]
+    assert "Note(Op::AreaOn, name, nullptr, flags, box);" in on
+    assert "bool FromBox(const Entry& e) { return Kind(e.op) == 0 && e.j == 1; }" in source
+    # who toggled it isn't the effect
+    assert "(Kind(x.op) == 0 || x.j == y.j)" in source
+    missing = source[source.index("std::vector<Entry> Missing("):]
+    missing = missing[:missing.index("\n}\n")]
+    assert "(FromBox(w) && !boxes)" in missing
+    assert "FromBox(w) && it != have.end() && FromBox(*it) && it->seq > walked" in missing
+    check = source[source.index("void CheckWorld() {"):]
+    check = check[:check.index("\n}\n")]
+    assert "g_spotUsed && g_realSet == g_pendingMapSet && read &&" in check and "< kBoxReach" in check
+    fallback = source[source.index("void NextFallback("):]
+    fallback = fallback[:fallback.index("\n}\n")]
+    assert "if (station && !g_rebuildAreas.empty()) {" in fallback
+    # the stand-in's boxes aren't hers
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "if (Position(PlayerHandle(), at) && !StandIn(at)) {\n            g_realFrom = g_notes.load();" in tick
+
+
+def test_a_pause_holds_the_load_check_rather_than_restarting_it():
+    """
+    the field check after a load wanted a second of unbroken free roam, so
+    pausing to check Save straight after loading kept putting it off, and Save
+    stayed off for eight pauses in a row (Vile Peaks, Nov 16). Free roam since
+    the load now adds up across pauses, and the reason says what it's waiting on
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "if (state != kStateFieldPause && state != kStateFieldPauseWait && state != kStateFieldPauseEnd) g_roamMs = 0;" in tick
+    assert "if (g_worldCheckWanted && state == kStateFieldIdle && g_roamMs > 1000 &&" in tick
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (g_worldCheckWanted)") < withheld.index("if (g_sanctioned.story < 0)")

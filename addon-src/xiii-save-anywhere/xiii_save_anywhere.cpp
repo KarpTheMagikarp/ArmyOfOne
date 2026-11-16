@@ -238,13 +238,19 @@ constexpr unsigned char kReleaseCharaHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x3
 constexpr unsigned char kTalkOnHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00};
 constexpr unsigned char kTalkOffHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0xA1, 0x84, 0x5A, 0x6E, 0x02};
 constexpr unsigned char kPathEdgeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x8B, 0x45, 0x08};
-// who's calling. The engine toggles areas on its own too, enemy groups
-// streaming in and out as you walk (0x5C88D0) and around fights (0x814B90),
-// and it keeps its own tally of those. A replay that forced one of them off
-// behind its back left it off for good: a save station that stayed invisible
-// until the next load (Nov 15). So only the natives count, the script
-// calling, plus the two spots a cutscene's own track plays a bg anim from
+// who's calling. The engine toggles areas on its own too: around fights
+// (0x814B90), refreshing enemy groups (0x5AEBF0), and from the area boxes the
+// map data puts where one stretch of a level hands over to the next
+// (0x5C88D0, four groups a box, all on or all off). The natives count, the
+// script calling, plus the two spots a cutscene's own track plays a bg anim
+// from, and the area boxes: those turn on the next stretch's gr_fa group,
+// which is where its save station's terminal lives. Left out, a load past the
+// box that started at a station before it never got that group, and the
+// terminal ahead stood there invisible, solid and dead (Vile Peaks, Nov 16).
+// The fights and enemy refreshes keep their own tally, and forcing one of
+// those behind the engine's back left a terminal off for good (Nov 15)
 constexpr DWORD kNativesFrom = 0x7BA4E0, kNativesTo = 0x7EBA00;
+constexpr DWORD kAreaBoxFrom = 0x1C88D0, kAreaBoxTo = 0x1C93F8;
 constexpr DWORD kCutsceneBgAnimA = 0x71EF14, kCutsceneBgAnimB = 0x71F3AF;
 // 99 save slots, and anything smaller than this isn't a whole save
 constexpr int kSlots = 99, kSaveMinBytes = 0x10000;
@@ -260,7 +266,8 @@ constexpr unsigned char kTextDtorHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0
 // the zone state machine's enum. Triggers are the table's 0-59, states its
 // 60-137, held internally as the table index minus 60
 constexpr int kTrgSaveReq = 41;
-constexpr int kStateFieldIdle = 3, kStateFieldPause = 23, kStateFieldPauseWait = 27, kStateSave = 60;
+constexpr int kStateFieldIdle = 3, kStateFieldPause = 23, kStateFieldPauseWait = 27, kStateFieldPauseEnd = 31,
+              kStateSave = 60;
 
 // every state with EVENT in its name (the table at 0x26A1728): cutscenes,
 // scenes you walk through, cutscenes inside a battle, and their pauses and
@@ -628,7 +635,8 @@ struct Entry {
     char a[16]{};  // the target: area, box, bg object, layout piece, chara
     char b[16]{};  // a bg anim's motion, a bg model's second name
     int i = 0;     // flags, live, shown, on
-    int j = 0;     // a bg anim's mode, or 1 when a layout's set is the fixed one
+    int j = 0;     // a bg anim's mode, 1 when a layout's set is the fixed one or an area box toggled an area
+    unsigned seq = 0;  // which note it was, this session only
 };
 
 int Kind(Op op) {
@@ -649,8 +657,12 @@ bool SameTarget(const Entry& x, const Entry& y) {
     return x.op != Op::Layout || (x.j == y.j && std::memcmp(x.b, y.b, 16) == 0);
 }
 
+// an area's j only says who toggled it, a script or an area box
+bool FromBox(const Entry& e) { return Kind(e.op) == 0 && e.j == 1; }
+
 bool SameEffect(const Entry& x, const Entry& y) {
-    return x.op == y.op && SameTarget(x, y) && x.i == y.i && x.j == y.j && std::memcmp(x.b, y.b, 16) == 0;
+    return x.op == y.op && SameTarget(x, y) && x.i == y.i && (Kind(x.op) == 0 || x.j == y.j) &&
+           std::memcmp(x.b, y.b, 16) == 0;
 }
 
 // what can be put back: the rest is only kept so the log can say it happened
@@ -666,10 +678,27 @@ std::string g_pendingMapSet;
 int g_pendingZone = -1;
 bool g_mapSetSwapLeft = false;
 bool g_pendingWanted = false;
+// the load starts at the save's spot, and where that is
+bool g_spotUsed = false;
+Vec4 g_savedSpot{};
+// how far from the spot the area boxes' groups still hold: a fallback to the
+// trail stays this close, the station rarely does
+constexpr float kBoxReach = 40.0f;
+// what the rebuild had for each area an area box's replay changed, in case
+// the load ends up at the station after all
+std::vector<Entry> g_rebuildAreas;
 // with Debug on, a station save keeps its journal too, in debug\, so loading
 // it can say how much of that world the game's own rebuild brought back
 int g_loadedSlot = -1;
 bool g_worldCheckWanted = false;
+// free roam since the load, which a pause only holds: checking right after
+// loading paused the check too, and Save stayed off a good while (Nov 16)
+ULONGLONG g_roamMs = 0, g_roamAt = 0;
+// the note count once it was her and not the stand-in after the load: an area
+// box after that is one she walked through, the stand-in's box isn't hers
+unsigned g_realFrom = ~0u;
+// and the map set then: a swap box she walks over after that is hers too
+std::string g_realSet;
 // the journal as a save of ours was asked for, for its .where
 std::vector<Entry> g_savedWorld;
 Progress g_atSave;
@@ -722,7 +751,8 @@ void Describe(const Entry& e, char* out, size_t size) {
         std::snprintf(out, size, "%s %s", kOpNames[static_cast<int>(e.op)], e.i ? "on" : "off");
         break;
     default:
-        std::snprintf(out, size, "%s %s (%d)", kOpNames[static_cast<int>(e.op)], Name(e.a).c_str(), e.i);
+        std::snprintf(out, size, "%s %s (%d)%s", kOpNames[static_cast<int>(e.op)], Name(e.a).c_str(), e.i,
+                      FromBox(e) ? " by an area box" : "");
     }
 }
 
@@ -748,6 +778,7 @@ void Note(Op op, const char* a, const char* b, int i, int j) {
     if (b) std::memcpy(e.b, b, strnlen(b, 16));
     e.i = i;
     e.j = j;
+    e.seq = ++g_notes;
     const int zone = ZoneNumber();
     if (zone != g_worldZone) ForgetWorld("a new zone");
     EnterCriticalSection(&g_worldLock);
@@ -757,7 +788,6 @@ void Note(Op op, const char* a, const char* b, int i, int j) {
     g_world.push_back(e);
     LeaveCriticalSection(&g_worldLock);
     g_lastNoteAt = GetTickCount64();
-    ++g_notes;
     if (!Replayable(op) && op != Op::Chara) ++g_lockedNotes;
     // a station load alone is a few dozen of these
     if (g_debug && g_worldLines < 4000) {
@@ -785,18 +815,38 @@ RetryFn g_retry = nullptr;
 NativeFn g_createChara = nullptr, g_releaseChara = nullptr, g_talkOn = nullptr, g_talkOff = nullptr,
          g_pathEdge = nullptr;
 
-bool FromScript(void* returnAddress) {
-    const DWORD rva = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(returnAddress) - g_base);
-    return rva >= kNativesFrom && rva < kNativesTo;
-}
-
 // an empty name is one of a native's unused slots, which the engine skips
 bool Named(const char* name) { return name && name[0]; }
 
+DWORD CallerRva(void* returnAddress) {
+    return static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(returnAddress) - g_base);
+}
+
+bool FromScript(void* returnAddress) {
+    const DWORD rva = CallerRva(returnAddress);
+    return rva >= kNativesFrom && rva < kNativesTo;
+}
+
+bool FromAreaBox(void* returnAddress) {
+    const DWORD rva = CallerRva(returnAddress);
+    return rva >= kAreaBoxFrom && rva < kAreaBoxTo;
+}
+
+// Debug only: the area calls nobody keeps, so a log shows what the engine did
+// on its own and from where
+void TraceEngineArea(const char* what, const char* name, int arg, void* from) {
+    if (!g_debug || !Named(name) || g_worldLines >= 4000) return;
+    ++g_worldLines;
+    Log("  engine: %s %s (%d) from 0x%lx", what, Name(name).c_str(), arg, static_cast<unsigned long>(CallerRva(from)));
+}
+
 int __fastcall AreaOnHook(void* scene, void* edx, const char* name, int flags) {
-    const bool kept = FromScript(__builtin_return_address(0)) && Named(name);
+    void* from = __builtin_return_address(0);
+    const bool box = FromAreaBox(from);
+    const bool kept = (FromScript(from) || box) && Named(name);
     const int out = g_areaOn(scene, edx, name, flags);
-    if (kept) Note(Op::AreaOn, name, nullptr, flags, 0);
+    if (kept) Note(Op::AreaOn, name, nullptr, flags, box);
+    else TraceEngineArea("area on", name, flags, from);
     return out;
 }
 
@@ -808,9 +858,12 @@ int __fastcall AreaFadeHook(void* scene, void* edx, const char* name, int arg) {
 }
 
 int __fastcall AreaOffHook(void* scene, void* edx, const char* name, int arg) {
-    const bool kept = FromScript(__builtin_return_address(0)) && Named(name);
+    void* from = __builtin_return_address(0);
+    const bool box = FromAreaBox(from);
+    const bool kept = (FromScript(from) || box) && Named(name);
     const int out = g_areaOff(scene, edx, name, arg);
-    if (kept) Note(Op::AreaOff, name, nullptr, arg, 0);
+    if (kept) Note(Op::AreaOff, name, nullptr, arg, box);
+    else TraceEngineArea("area off", name, arg, from);
     return out;
 }
 
@@ -823,7 +876,7 @@ int __fastcall ObjectHook(void* scene, void* edx, const char* name, int live) {
 
 int __fastcall BgAnimHook(void* scene, void* edx, const char* object, int arg, const char* motion, int mode) {
     void* from = __builtin_return_address(0);
-    const DWORD rva = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(from) - g_base);
+    const DWORD rva = CallerRva(from);
     const bool kept = (FromScript(from) || rva == kCutsceneBgAnimA || rva == kCutsceneBgAnimB) && Named(object);
     const int out = g_bgAnim(scene, edx, object, arg, motion, mode);
     if (kept) Note(Op::BgAnim, object, motion, arg, mode);
@@ -998,16 +1051,20 @@ void Replay(const Entry& e) {
 
 // what the rebuild left different from the journal, so what a replay would
 // put back. Only targets the journal knows: whatever else the station's load
-// script turned on, the game turned on at a station too
-std::vector<Entry> Missing(const std::vector<Entry>& want, const std::vector<Entry>& have, int* other) {
+// script turned on, the game turned on at a station too. An area box's call
+// only goes back where the boxes are the ones it was made under, and not over
+// one she's walked through since the load, which is newer than the save
+std::vector<Entry> Missing(const std::vector<Entry>& want, const std::vector<Entry>& have, int* other,
+                           bool boxes = true, unsigned walked = ~0u) {
     std::vector<Entry> out;
     if (other) *other = 0;
     for (const Entry& w : want) {
-        if (!Replayable(w.op)) {
+        if (!Replayable(w.op) || (FromBox(w) && !boxes)) {
             if (other) ++*other;
             continue;
         }
         auto it = std::find_if(have.begin(), have.end(), [&](const Entry& h) { return SameTarget(h, w); });
+        if (FromBox(w) && it != have.end() && FromBox(*it) && it->seq > walked) continue;
         if (it == have.end() || !SameEffect(*it, w)) out.push_back(w);
     }
     return out;
@@ -1050,12 +1107,14 @@ bool g_idleSolid = false;
 // stays strictly on floor the game vouched for
 bool g_nearFloor = false;
 constexpr float kNearFloorAcross = 10.0f, kNearFloorUp = 1.0f;
-// rode something: a sustained climb or drop steeper than she walks, or a
-// platform carrying her. Steady only sees the last half second, so a slow lift
-// or one that's just stopped got past it, and the game may call a lift floor.
-// Cleared once she's stood on floor a few steps from where the ride was last
-// seen, so the trail's next point is ground off the lift (Ch 9: a save on the
-// lift after a scene, no lift on load, a fall to the floor below the beat)
+// rode a lift: a climb or drop steeper than she walks, kept up longer than any
+// jump. Steady only sees the last half second, so a slow lift or one that's
+// just stopped got past it, and the game may call a lift floor. Cleared once
+// she's stood on floor a few steps from where the ride was last seen, so the
+// trail's next point is ground off the lift (Ch 9: a save on the lift after a
+// scene, no lift on load, a fall to the floor below the beat). Being carried
+// doesn't latch it: judged every step it caught plain running round corners
+// and kept Save off all over Vile Peaks (Nov 16). The pause still checks it
 bool g_rode = false;
 Vec4 g_rodeAt{};
 constexpr float kOffRide = 6.0f;
@@ -1101,7 +1160,9 @@ float Along(const Sample& s, int axis, float dx, float dz) {
 
 // sideways (or spinning) platforms: over the last 0.3 s she kept moving in
 // directions she wasn't facing, which walking never does. Judged step by
-// step against her facing at that step, so a sharp turn doesn't count
+// step against her facing at that step, so a sharp turn doesn't count. More
+// than 60 degrees off counts as astray: at 45, running a bend in Vile Peaks
+// then pausing read as carried (Nov 16)
 bool Carried() {
     const int axis = FacingAxis();
     if (axis < 0) return false;
@@ -1120,7 +1181,7 @@ bool Carried() {
         travelled += step;
         if (step < 0.012f) continue;
         ++moving;
-        astray += Along(s, axis, dx, dz) < 0.7f;
+        astray += Along(s, axis, dx, dz) < 0.5f;
     }
     return travelled > 0.3f && moving >= 3 && astray * 10 >= moving * 7;
 }
@@ -1538,13 +1599,13 @@ bool CanSave() {
 // whether Save goes on the bar, and why not when it doesn't
 const char* Withheld() {
     if (!CanSave()) return "this area's save point isn't loaded";
+    if (g_worldCheckWanted) return "the field's still being put back after the load";
     if (g_sanctioned.story < 0) return "you haven't been at a station since this field started";
     static Progress now;
     ReadProgress(now);
     // a sequence still running, whatever came before
     if (now.ui != g_sanctioned.ui) return "a sequence has the field UI off";
     if (std::memcmp(now.menu, g_sanctioned.menu, sizeof now.menu) != 0) return "a sequence has the menus locked";
-    if (g_worldCheckWanted) return "the field's still being put back after the load";
     // a story beat or a scene since the last station used to be the end of
     // it, because a load only rebuilds the station's side of the story. The
     // journal carries everything the scripts did to the field since, and a
@@ -1572,7 +1633,7 @@ const char* Withheld() {
     float rise = 0;
     if (!Steady(rise)) return "you were going up or down (a lift, a fall or a jump)";
     if (Carried()) return "something was carrying you (a moving platform)";
-    if (g_rode) return "she rode a lift or a platform and hasn't walked off it yet";
+    if (g_rode) return "she rode a lift and hasn't walked off it yet";
     return nullptr;
 }
 
@@ -1690,6 +1751,10 @@ void TryArm(int marker) {
     LeaveCriticalSection(&g_fileLock);
     g_loadedSlot = load.slot;
     g_worldCheckWanted = true;
+    g_roamMs = 0;
+    g_realFrom = ~0u;
+    g_spotUsed = false;
+    g_rebuildAreas.clear();
     g_pendingWanted = false;
     g_pendingMapSet = "-";
     g_pendingZone = -1;
@@ -1720,6 +1785,8 @@ void TryArm(int marker) {
         // turned into the spawn's matrix on the first answer, against the station's
         g_spawn = {true, marker, GetTickCount64() + 20000, saved, load.slot, 0};
         g_landTarget = Translation(saved.m);
+        g_savedSpot = g_landTarget;
+        g_spotUsed = true;
         g_landCheckAt = GetTickCount64() + 2500;
         g_landGiveUp = GetTickCount64() + 15000;
         g_landSeenAt = g_rescueAt = 0;
@@ -1824,6 +1891,12 @@ void NextFallback(DWORD handle, ULONGLONG now, const char* why) {
     }
     const bool station = g_fallbackAt == g_fallbackCount;
     g_landTarget = station ? g_stationPos : g_fallback[g_fallbackAt];
+    // the station's stretch of level, not the spot's: its own groups back
+    if (station && !g_rebuildAreas.empty()) {
+        Log("putting back the %u area groups the rebuild had at the station", static_cast<unsigned>(g_rebuildAreas.size()));
+        for (const Entry& e : g_rebuildAreas) Replay(e);
+        g_rebuildAreas.clear();
+    }
     Log("%s, trying %s at %.2f %.2f %.2f", why, station ? "the station" : "where you walked before",
         g_landTarget.v[0], g_landTarget.v[1], g_landTarget.v[2]);
     g_setPosFlash(handle, g_landTarget.v, 0);
@@ -2002,8 +2075,24 @@ void CheckWorld() {
             g_pending.clear();
             return;
         }
-        const std::vector<Entry> missing = Missing(g_pending, have, &other);
+        // the area boxes' groups are the stretch of level around the spot, so
+        // only there, on the map set it was saved on. Started at the station
+        // instead, the rebuild's own groups are the right ones
+        Vec4 at{};
+        const bool read = Position(PlayerHandle(), at);
+        const bool boxes = g_spotUsed && g_realSet == g_pendingMapSet && read &&
+                           std::hypot(at.v[0] - g_savedSpot.v[0], at.v[2] - g_savedSpot.v[2]) < kBoxReach;
+        if (!boxes)
+            Log("not at the spot on map set %s (came up on %s), the area boxes' groups stay as the rebuild made them",
+                g_pendingMapSet.c_str(), g_realSet.c_str());
+        const std::vector<Entry> missing = Missing(g_pending, have, &other, boxes, g_realFrom);
         LogMissing("putting the field back the way it was saved", missing, other);
+        g_rebuildAreas.clear();
+        for (const Entry& e : missing) {
+            if (!FromBox(e)) continue;
+            auto it = std::find_if(have.begin(), have.end(), [&](const Entry& h) { return SameTarget(h, e); });
+            if (it != have.end()) g_rebuildAreas.push_back(*it);
+        }
         for (const Entry& e : missing) Replay(e);
         g_pending.clear();
         return;
@@ -2037,6 +2126,13 @@ void Tick() {
     if (stale >= 0) Log("slot %d saved at a station, its save anywhere spot is gone with the old save", stale);
     if (state != kStateFieldIdle) g_idleSince = 0;
     else if (!g_idleSince) g_idleSince = now;
+    if (state == kStateFieldIdle) {
+        if (g_roamAt) g_roamMs += now - g_roamAt;
+        g_roamAt = now;
+    } else {
+        g_roamAt = 0;
+        if (state != kStateFieldPause && state != kStateFieldPauseWait && state != kStateFieldPauseEnd) g_roamMs = 0;
+    }
     // a new field's coordinates aren't the old one's
     if (state == 1 || state == 2) {
         g_trailCount = 0;
@@ -2081,9 +2177,15 @@ void Tick() {
                 g_runDy += stepDy;
                 g_runMs += dt;
             }
+            // a load settling her onto the spot isn't a ride either
+            if (g_landCheckAt) {
+                g_runDy = 0;
+                g_runMs = 0;
+            }
             const bool carried = Carried();
-            if ((g_runMs >= 600 && std::fabs(g_runDy) >= 0.75f) || std::fabs(g_runDy) >= 2.0f || carried) {
-                if (!g_rode) Log("riding something (%s), Save waits till she's off it", carried ? "carried" : "up or down");
+            if (g_runMs >= 1200 && std::fabs(g_runDy) >= 1.0f) {
+                if (!g_rode) Log("riding a lift (%.1f %s in %llu ms), Save waits till she's off it", std::fabs(g_runDy),
+                                 g_runDy > 0 ? "up" : "down", g_runMs);
                 g_rode = true;
                 g_rodeAt = next.pos;
             }
@@ -2104,7 +2206,7 @@ void Tick() {
             // floor you've walked since
             const bool offRide = !g_rode || std::hypot(next.pos.v[0] - g_rodeAt.v[0], next.pos.v[2] - g_rodeAt.v[2]) >= kOffRide;
             if (Steady(rise) && !carried && g_idleSolid && offRide) {
-                if (g_rode) Log("off whatever she rode, at %.2f %.2f %.2f", next.pos.v[0], next.pos.v[1], next.pos.v[2]);
+                if (g_rode) Log("off the lift, at %.2f %.2f %.2f", next.pos.v[0], next.pos.v[1], next.pos.v[2]);
                 g_rode = false;
                 if (g_sanctioned.story >= 0) Remember(next.pos);
             }
@@ -2201,8 +2303,15 @@ void Tick() {
     // scene, and only then is it you, in free roam, with the calls gone quiet
     // A field whose scripts never go quiet (a loop toggling something every
     // second) still gets its turn once free roam has run a while
-    if (g_worldCheckWanted && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 1000 &&
-        (now - g_lastNoteAt.load() > 1000 || now - g_idleSince > 6000)) {
+    if (g_worldCheckWanted && g_realFrom == ~0u && state == kStateFieldIdle) {
+        Vec4 at{};
+        if (Position(PlayerHandle(), at) && !StandIn(at)) {
+            g_realFrom = g_notes.load();
+            g_realSet = MapSetName();
+        }
+    }
+    if (g_worldCheckWanted && state == kStateFieldIdle && g_roamMs > 1000 &&
+        (now - g_lastNoteAt.load() > 1000 || g_roamMs > 6000)) {
         Vec4 at{};
         if (Position(PlayerHandle(), at) && !StandIn(at)) {
             g_worldCheckWanted = false;
@@ -2574,7 +2683,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.6, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.7, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2614,7 +2723,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.6";
+    d.version = "0.25.7";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
