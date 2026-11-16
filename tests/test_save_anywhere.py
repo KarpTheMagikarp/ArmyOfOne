@@ -468,13 +468,13 @@ def test_save_waits_for_the_levels_own_floor():
     assert "constexpr DWORD kOnLevelFloor = 1u << 22;" in source
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
-    assert "if (!g_idleSolid && !g_nearFloor)" in withheld and "ReadFooting" not in withheld
+    assert "if (!g_idleSolid && !(g_nearFloor && g_trailCount > 0))" in withheld and "ReadFooting" not in withheld
     footing = source[source.index("bool ReadFooting(DWORD handle, Footing& out) {"):]
     footing = footing[:footing.index("\n}\n")]
     assert "if (got < sizeof block) return false;" in footing
     assert "if (now - g_idleSince >= 100) {\n                const bool read = ReadFooting(PlayerHandle(), footing);\n" \
            "                g_idleSolid = read && footing.solid;" in source
-    assert "Steady(rise) && !Carried() && g_idleSolid) Remember(next.pos);" in source
+    assert "if (Steady(rise) && !carried && g_idleSolid && offRide) {" in source
     # a new field starts her off the floor until she's sampled standing on it
     assert "g_trailCount = 0;\n        g_idleSolid = false;" in source
 
@@ -531,7 +531,7 @@ def test_restart_points_count_like_a_station():
     taken = source[source.index("if (state == kStateFieldIdle && g_restartPoint.exchange(false)) {"):]
     taken = taken[:taken.index("\n    }\n")]
     assert "Drifted(now, g_restartAt)" in taken and 'Sanctify("a restart point", false);' in taken
-    assert "g_nearFloor = false;\n        // a field change after the point means it's not this field's any more\n" \
+    assert "g_runMs = 0;\n        // a field change after the point means it's not this field's any more\n" \
            "        g_restartPoint = false;" in source
 
 
@@ -634,10 +634,37 @@ def test_plain_ground_after_a_hop_still_counts_as_floor():
     source = SOURCE.read_text(encoding="utf-8")
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
-    assert "if (!g_idleSolid && !g_nearFloor)" in withheld
+    assert "if (!g_idleSolid && !(g_nearFloor && g_trailCount > 0))" in withheld
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
-    assert "Steady(rise) && !Carried() && g_idleSolid) Remember(next.pos);" in tick
+    assert "if (Steady(rise) && !carried && g_idleSolid && offRide) {" in tick
+
+
+def test_a_ride_holds_save_back_till_shes_walked_off_it():
+    """
+    Ch 9 on an older build: a save on a lift going up after a scene, no lift on
+    load, a fall to the fight floor below, and that fight no longer starts the
+    scene. Steady only sees half a second and the game may call a stopped lift
+    floor, so a ride latches until she's stood on floor a few metres off it,
+    and after a scene there has to be walked floor for a missing one to land on
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    # sustained and steeper than 45, so stairs and a hop never latch
+    assert "std::hypot(dx, dz) < std::fabs(stepDy)" in tick
+    assert "(g_runMs >= 600 && std::fabs(g_runDy) >= 0.75f) || std::fabs(g_runDy) >= 2.0f || carried" in tick
+    # pauses, fights, scenes and teleports break a run but never clear the latch
+    assert "dt <= 1000" in tick and "< 2.0f;" in tick
+    # nothing on the ride goes on the trail
+    assert tick.index("offRide") < tick.index("Remember(next.pos)")
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert "if (g_rode) return" in withheld
+    assert "if (g_trailCount == 0 && (g_sceneSince >= 0 || now.story != g_sanctioned.story))" in withheld
+    sanctify = source[source.index("void Sanctify("):]
+    sanctify = sanctify[:sanctify.index("\n}\n")]
+    assert "g_rode = false;" in sanctify
 
 
 def test_a_load_of_ours_counts_once_the_field_is_put_back():

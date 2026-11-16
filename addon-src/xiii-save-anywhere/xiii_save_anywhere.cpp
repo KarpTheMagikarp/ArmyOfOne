@@ -1050,6 +1050,18 @@ bool g_idleSolid = false;
 // stays strictly on floor the game vouched for
 bool g_nearFloor = false;
 constexpr float kNearFloorAcross = 10.0f, kNearFloorUp = 1.0f;
+// rode something: a sustained climb or drop steeper than she walks, or a
+// platform carrying her. Steady only sees the last half second, so a slow lift
+// or one that's just stopped got past it, and the game may call a lift floor.
+// Cleared once she's stood on floor a few steps from where the ride was last
+// seen, so the trail's next point is ground off the lift (Ch 9: a save on the
+// lift after a scene, no lift on load, a fall to the floor below the beat)
+bool g_rode = false;
+Vec4 g_rodeAt{};
+constexpr float kOffRide = 6.0f;
+// the vertical run that's building: same direction every sample, steeper than 45
+float g_runDy = 0;
+ULONGLONG g_runMs = 0;
 // which of the two rows is her facing, learnt from her own walking: moving
 // under her own steam she goes the way she faces. Not judged until it's clear
 int g_axisVotes[2]{};
@@ -1550,11 +1562,17 @@ const char* Withheld() {
         if (std::memcmp(now.zone, g_sanctioned.zone, sizeof now.zone) != 0)
             return "a zone flag changed since you were last at a station, and no save keeps those";
     }
-    if (!g_idleSolid && !g_nearFloor)
+    // near the floor only counts with ground walked since the last scene or
+    // station behind it: if the spot's floor is gone on load, that's where she
+    // lands instead of a station that may sit on the far side of the scene
+    if (!g_idleSolid && !(g_nearFloor && g_trailCount > 0))
         return "she isn't on the level's own floor (a lift, a platform, mid-air, or not moved since loading)";
+    if (g_trailCount == 0 && (g_sceneSince >= 0 || now.story != g_sanctioned.story))
+        return "she hasn't stood on the level's floor since the scene";
     float rise = 0;
     if (!Steady(rise)) return "you were going up or down (a lift, a fall or a jump)";
     if (Carried()) return "something was carrying you (a moving platform)";
+    if (g_rode) return "she rode a lift or a platform and hasn't walked off it yet";
     return nullptr;
 }
 
@@ -1784,6 +1802,7 @@ void Sanctify(const char* where, bool baseline = true) {
         LeaveCriticalSection(&g_worldLock);
     }
     g_trailCount = 0;
+    g_rode = false;
     if (news) Log("story %d at %s", now.story, where);
 }
 
@@ -2023,6 +2042,9 @@ void Tick() {
         g_trailCount = 0;
         g_idleSolid = false;
         g_nearFloor = false;
+        g_rode = false;
+        g_runDy = 0;
+        g_runMs = 0;
         // a field change after the point means it's not this field's any more
         g_restartPoint = false;
     }
@@ -2043,6 +2065,28 @@ void Tick() {
                 std::fabs(next.pos.v[1] - prev.pos.v[1]) < 0.05f && g_axisVotes[0] + g_axisVotes[1] < 100000)
                 for (int a = 0; a < 2; ++a) g_axisVotes[a] += Along(next, a, dx, dz) > 0.9f;
             g_track[g_trackNext++ % 16] = next;
+            const float stepDy = next.pos.v[1] - prev.pos.v[1];
+            const ULONGLONG dt = now - prev.at;
+            // a gap is a pause, a fight or a scene, and a jump of metres is a
+            // teleport (a load, a rescue): neither is a ride. A hop is up then
+            // down inside a few hundred ms, so it never builds a run
+            const bool rising = prev.at && dt <= 1000 && std::hypot(dx, dz) < std::fabs(stepDy) &&
+                                std::fabs(stepDy) * 1000.0f > 0.1f * static_cast<float>(dt) &&
+                                std::hypot(std::hypot(dx, dz), stepDy) < 2.0f;
+            if (!rising || (g_runDy > 0) != (stepDy > 0)) {
+                g_runDy = 0;
+                g_runMs = 0;
+            }
+            if (rising) {
+                g_runDy += stepDy;
+                g_runMs += dt;
+            }
+            const bool carried = Carried();
+            if ((g_runMs >= 600 && std::fabs(g_runDy) >= 0.75f) || std::fabs(g_runDy) >= 2.0f || carried) {
+                if (!g_rode) Log("riding something (%s), Save waits till she's off it", carried ? "carried" : "up or down");
+                g_rode = true;
+                g_rodeAt = next.pos;
+            }
             float rise = 0;
             Footing footing;
             // not in the first beat back from a pause either, before the game has
@@ -2058,7 +2102,12 @@ void Tick() {
             // after a scene too, now a save can come after one: the trail is
             // where a load with no floor at the spot lands you, so it has to be
             // floor you've walked since
-            if (g_sanctioned.story >= 0 && Steady(rise) && !Carried() && g_idleSolid) Remember(next.pos);
+            const bool offRide = !g_rode || std::hypot(next.pos.v[0] - g_rodeAt.v[0], next.pos.v[2] - g_rodeAt.v[2]) >= kOffRide;
+            if (Steady(rise) && !carried && g_idleSolid && offRide) {
+                if (g_rode) Log("off whatever she rode, at %.2f %.2f %.2f", next.pos.v[0], next.pos.v[1], next.pos.v[2]);
+                g_rode = false;
+                if (g_sanctioned.story >= 0) Remember(next.pos);
+            }
         }
     }
     if (InScene(state) && g_sceneSince < 0 && g_sanctioned.story >= 0) {
@@ -2525,7 +2574,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.5, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.6, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2565,7 +2614,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.5";
+    d.version = "0.25.6";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
