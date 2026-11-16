@@ -474,7 +474,7 @@ def test_save_waits_for_the_levels_own_floor():
     assert "if (got < sizeof block) return false;" in footing
     assert "if (now - g_idleSince >= 100) {\n                const bool read = ReadFooting(PlayerHandle(), footing);\n" \
            "                g_idleSolid = read && footing.solid;" in source
-    assert "!Carried() && g_idleSolid)\n                Remember(next.pos);" in source
+    assert "Steady(rise) && !Carried() && g_idleSolid) Remember(next.pos);" in source
     # a new field starts her off the floor until she's sampled standing on it
     assert "g_trailCount = 0;\n        g_idleSolid = false;" in source
 
@@ -502,7 +502,7 @@ def test_the_log_rotates_and_the_spots_folder_explains_itself():
     assert worker.index("RotateLog();") < worker.index("Log(")
     assert "1024 * 1024" in source and 'L".1"' in source
     assert "ExplainLocations();" in source[source.index("void WriteWhere("):]
-    assert "Safe to delete" in source
+    assert "Keep them with your saves." in source
 
 
 def test_restart_points_count_like_a_station():
@@ -530,7 +530,7 @@ def test_restart_points_count_like_a_station():
     assert "now.ui" not in drifted and "now.menu" not in drifted
     taken = source[source.index("if (state == kStateFieldIdle && g_restartPoint.exchange(false)) {"):]
     taken = taken[:taken.index("\n    }\n")]
-    assert "Drifted(now, g_restartAt)" in taken and 'Sanctify("a restart point");' in taken
+    assert "Drifted(now, g_restartAt)" in taken and 'Sanctify("a restart point", false);' in taken
     assert "g_nearFloor = false;\n        // a field change after the point means it's not this field's any more\n" \
            "        g_restartPoint = false;" in source
 
@@ -577,7 +577,8 @@ def test_a_load_waits_for_the_real_rebuild_before_putting_anything_back():
     """
     the first free roam after a load is the stand-in at 0 1.5 -10, before the
     station's load script has run. A replay there hung the load for good (Nov
-    15), so it waits for the player, quiet calls, and the same map set
+    15), so it waits for the player and quiet calls, and only replays a
+    journal from this zone
     """
     source = SOURCE.read_text(encoding="utf-8")
     tick = source[source.index("void Tick() {"):]
@@ -586,7 +587,7 @@ def test_a_load_waits_for_the_real_rebuild_before_putting_anything_back():
     wait = wait[:wait.index("CheckWorld();")]
     assert "!StandIn(at)" in wait and "g_lastNoteAt" in wait
     check = source[source.index("void CheckWorld() {"):]
-    assert check.index("g_pendingMapSet != MapSetName()") < check.index("Replay(e)")
+    assert check.index("g_pendingZone != g_worldZone") < check.index("Replay(e)")
 
 
 def test_only_what_a_script_asked_for_goes_in_the_journal():
@@ -636,7 +637,7 @@ def test_plain_ground_after_a_hop_still_counts_as_floor():
     assert "if (!g_idleSolid && !g_nearFloor)" in withheld
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
-    assert "!Carried() && g_idleSolid)\n                Remember(next.pos);" in tick
+    assert "Steady(rise) && !Carried() && g_idleSolid) Remember(next.pos);" in tick
 
 
 def test_a_load_of_ours_counts_once_the_field_is_put_back():
@@ -649,3 +650,42 @@ def test_a_load_of_ours_counts_once_the_field_is_put_back():
     ours = source[source.index("} else if (g_sanction == kOurs) {"):]
     ours = ours[:ours.index("} else {")]
     assert ours.index("if (!g_worldCheckWanted) {") < ours.index('Sanctify("a save anywhere load");')
+
+
+def test_a_save_of_ours_gets_its_field_back_even_when_its_spot_cant_be_used():
+    """
+    a save made after a story beat needs the field put back whether or not it
+    starts at the spot, so the journal is taken whenever the save is ours, and
+    the replay goes by the zone, not the map set: a step across a swap box
+    before the replay ran used to skip it whole
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    arm = source[source.index("void TryArm(int marker) {"):]
+    arm = arm[:arm.index("\n}\n")]
+    assert arm.index("if (ours && load.hash == stored && format >= 6) {") < arm.index("if (!ours) {")
+    check = source[source.index("void CheckWorld() {"):]
+    check = check[:check.index("\n}\n")]
+    assert "if (g_pendingZone != g_worldZone) {" in check and "MapSetName()" not in check
+    # and only the rebuild's own map set ask is ever swapped
+    hook = source[source.index("int __fastcall MapSetHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "g_mapSetSwapLeft = false;" in hook
+
+
+def test_the_spots_folder_says_to_keep_the_files():
+    """since 0.25 a .where carries the field too, so the note that called them safe to delete had to go"""
+    source = SOURCE.read_text(encoding="utf-8")
+    explain = source[source.index("void ExplainLocations() {"):]
+    explain = explain[:explain.index("\n}\n")]
+    assert "Safe to delete" not in explain and "Keep them with your saves." in explain
+    assert "GetFileAttributesA" not in explain
+
+
+def test_charas_and_talk_reset_with_the_field_but_not_at_a_restart_point():
+    source = SOURCE.read_text(encoding="utf-8")
+    forget = source[source.index("void ForgetWorld(const char* why) {"):]
+    forget = forget[:forget.index("\n}\n")]
+    assert "g_charaNet.clear();" in forget and "g_lockedAtSanction = g_lockedNotes.load();" in forget
+    sanctify = source[source.index("void Sanctify(const char* where, bool baseline = true) {"):]
+    sanctify = sanctify[:sanctify.index("\n}\n")]
+    assert sanctify.index("if (baseline) {") < sanctify.index("g_charaNet.clear();")

@@ -192,7 +192,7 @@
         {
           "source": "assets/mods/xiii-save-anywhere/xiii_save_anywhere.asi",
           "target": "xiii_save_anywhere.asi",
-          "sha256": "e74a3cf7ce4dd310ddeaf838b0e2e076ec6bf96ea93fa5cbb6db40335fba8462"
+          "sha256": "68b72d7293930f2fe717502dfbe33bcb10811c64cd5ffd77b8a495fda38e16ec"
         },
         {
           "source": "assets/mods/xiii-save-anywhere/xiii-save-anywhere.ini",
@@ -215,7 +215,7 @@
       "ui_job_id": "saveanywhere",
       "credit": "made for this patcher, with MinHook by Tsuda Kageyu (BSD 2-Clause)",
       "player_note": "Pause while exploring and press Y (or its key) to save through the game's own save screen. Loading it puts you back where you stood.",
-      "notes": "a NovaFix add-on (addon-src/xiii-save-anywhere, tools/build_xiii_save_anywhere.sh). Y on the field pause screen resumes and fires the game's own TRG_SAVE_REQ once the zone state machine is back in FIELD_IDLE, so the station save screen runs as normal. where you stood goes in save-locations\\ff13-NN.where, and on load the start marker lookup answers with it instead of the station's. only offered with no scene since the last station, solid footing and nothing carrying the player; a missing floor on load falls back along a trail of recent spots, then the station. every hooked site is byte checked against the Steam ffxiiiimg.exe and the add-on stays off on any mismatch, which is why patcher/save_anywhere.py keeps code mods off those sites. off by default. the source header has the details."
+      "notes": "a NovaFix add-on (addon-src/xiii-save-anywhere, tools/build_xiii_save_anywhere.sh). Y on the field pause screen resumes and fires the game's own TRG_SAVE_REQ once the zone state machine is back in FIELD_IDLE, so the station save screen runs as normal. where you stood goes in save-locations\\ff13-NN.where, and on load the start marker lookup answers with it instead of the station's. the .where also carries a journal of what the scripts did to the field (areas, boxes, bg anims, layout, encounters) since it started, and a load puts back whatever the station's rebuild left different. only offered in free roam with no sequence holding the UI or menus, nothing since the last station a load can't put back (charas made or let go, talk callbacks, path edges, zone flags), solid footing and nothing carrying the player; a missing floor on load falls back along a trail of recent spots, then the station. every hooked site is byte checked against the Steam ffxiiiimg.exe and the add-on stays off on any mismatch, which is why patcher/save_anywhere.py keeps code mods off those sites. off by default. the source header has the details."
     },
     {
       "id": "install_reshade",

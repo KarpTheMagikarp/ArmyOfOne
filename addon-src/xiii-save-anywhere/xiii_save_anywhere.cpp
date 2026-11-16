@@ -664,6 +664,7 @@ int g_worldZone = -1;
 std::vector<Entry> g_pending;
 std::string g_pendingMapSet;
 int g_pendingZone = -1;
+bool g_mapSetSwapLeft = false;
 bool g_pendingWanted = false;
 // with Debug on, a station save keeps its journal too, in debug\, so loading
 // it can say how much of that world the game's own rebuild brought back
@@ -690,9 +691,11 @@ unsigned g_lockedAtSanction = 0;
 std::map<std::string, int> g_charaNet;
 
 bool CharasMoved() {
-    for (const auto& [name, net] : g_charaNet)
-        if (net != 0) return true;
-    return false;
+    EnterCriticalSection(&g_worldLock);
+    bool moved = false;
+    for (const auto& [name, net] : g_charaNet) moved = moved || net != 0;
+    LeaveCriticalSection(&g_worldLock);
+    return moved;
 }
 
 int ZoneNumber() {
@@ -730,6 +733,10 @@ void ForgetWorld(const char* why) {
     const size_t had = g_world.size();
     g_world.clear();
     g_worldZone = ZoneNumber();
+    // the charas and talk changes of a field that's gone are gone with it.
+    // What the new field's own setup does from here still counts
+    g_charaNet.clear();
+    g_lockedAtSanction = g_lockedNotes.load();
     LeaveCriticalSection(&g_worldLock);
     if (had) Trace("world journal cleared (%s), had %u", why, static_cast<unsigned>(had));
 }
@@ -847,7 +854,11 @@ int __cdecl EncountHook(int on) {
 // which set is in: the game swaps under them all the time
 int __fastcall MapSetHook(void* zone, void* edx, const char* name) {
     if (g_debug && name) Log("  world: map set %s asked for", Name(name).c_str());
-    if (name && g_pendingWanted && g_pendingMapSet != "-" && g_pendingZone == ZoneNumber()) {
+    // only the rebuild's own ask: one you walk across a swap box for before
+    // the field's been put back is the game's, and taking that would be the
+    // sky all over again
+    if (name && g_pendingWanted && g_mapSetSwapLeft && g_pendingMapSet != "-" && g_pendingZone == ZoneNumber()) {
+        g_mapSetSwapLeft = false;
         const std::string asked = Name(name);
         if (asked != g_pendingMapSet && g_pendingMapSet.size() < 16) {
             char want[16]{};
@@ -900,7 +911,11 @@ void NoteNative(Op op, void* vm, bool on) {
     // "ev_en_ho" is what got released)
     const char* target = op == Op::Chara && on ? texts[1] : texts[0];
     Note(op, target, nullptr, on, 0);
-    if (op == Op::Chara && target) g_charaNet[Name(target)] += on ? 1 : -1;
+    if (op == Op::Chara && target) {
+        EnterCriticalSection(&g_worldLock);
+        g_charaNet[Name(target)] += on ? 1 : -1;
+        LeaveCriticalSection(&g_worldLock);
+    }
     Trace("  world: %s %s, slots%s", kOpNames[static_cast<int>(op)], on ? "set" : "cleared", raw);
 }
 
@@ -1227,13 +1242,16 @@ unsigned long long Hash(const void* data, int size) {
 }
 
 // for whoever opens the folder wondering what these are and if they can go
+// rewritten every time, so an older copy that says these are safe to
+// delete doesn't outlive the change that made them matter
 void ExplainLocations() {
     const std::string path = Folder("save-locations") + "\\README.txt";
-    if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES) return;
     FILE* file = nullptr;
     if (fopen_s(&file, path.c_str(), "w") != 0 || !file) return;
-    fputs("Where your Save Anywhere saves put you back, one file per save slot (ff13-07.where is slot 7).\n"
-          "Safe to delete: that save then loads at its save station like any other.\n"
+    fputs("Your Save Anywhere saves, one file per save slot (ff13-07.where is slot 7): where you stood, and\n"
+          "what the story had done to the area around you, which the game's own save doesn't keep.\n"
+          "Keep them with your saves. Without its file a save made with Save Anywhere starts at its save\n"
+          "station, and if it was made after a story scene, parts of the area may not be the way you left them.\n"
           "A file only counts while it matches its save, and one is removed when you save over that slot\n"
           "at a station.\n",
           file);
@@ -1657,13 +1675,22 @@ void TryArm(int marker) {
     g_pendingWanted = false;
     g_pendingMapSet = "-";
     g_pendingZone = -1;
+    g_mapSetSwapLeft = true;
 
     unsigned long long stored = 0;
     SavePoint point{}, now{};
     Matrix saved{};
     int format = 0;
     std::vector<Entry> world;
-    if (!ReadWhere(load.slot, stored, point, saved, &format, g_fallback, &g_fallbackCount, &world)) {
+    const bool ours = ReadWhere(load.slot, stored, point, saved, &format, g_fallback, &g_fallbackCount, &world);
+    // the field's put back whenever the save is ours, whether or not the spot
+    // can be used: a save made after a story beat needs its field back even
+    // if it ends up starting at the station
+    if (ours && load.hash == stored && format >= 6) {
+        g_pending = std::move(world);
+        g_pendingWanted = true;
+    }
+    if (!ours) {
         Log("loaded slot %d, which has no spot of ours", load.slot);
     } else if (load.hash != stored) {
         Log("slot %d was saved over since its spot was kept, starting at the station", load.slot);
@@ -1682,8 +1709,6 @@ void TryArm(int marker) {
         g_fallbackAt = -1;
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
-        g_pending = std::move(world);
-        g_pendingWanted = format >= 6;
         Log("slot %d: start marker %d answers with %.2f %.2f %.2f, %u things to check the field for once it's up",
             load.slot, marker, saved.m[12], saved.m[13], saved.m[14], static_cast<unsigned>(g_pending.size()));
     }
@@ -1743,14 +1768,21 @@ int __cdecl RestartSaveHook(void* vm) {
 }
 
 // keeps a state as the sanctioned one, saying so only when it's news
-void Sanctify(const char* where) {
+// a restart point keeps the chara and talk baseline where it was: a load of
+// ours still rebuilds from the station, not the restart point, so a chara
+// the sequence made before the point is still one the station never makes
+void Sanctify(const char* where, bool baseline = true) {
     static Progress now;
     ReadProgress(now);
     const bool news = g_sanctioned.story < 0 || Moved(now) || g_sceneSince >= 0;
     g_sanctioned = now;
     g_sceneSince = -1;
-    g_lockedAtSanction = g_lockedNotes.load();
-    g_charaNet.clear();
+    if (baseline) {
+        EnterCriticalSection(&g_worldLock);
+        g_lockedAtSanction = g_lockedNotes.load();
+        g_charaNet.clear();
+        LeaveCriticalSection(&g_worldLock);
+    }
     g_trailCount = 0;
     if (news) Log("story %d at %s", now.story, where);
 }
@@ -1941,11 +1973,13 @@ void CheckWorld() {
     int other = 0;
     if (g_pendingWanted) {
         g_pendingWanted = false;
-        // a different map set means the rebuild built some other piece of the
-        // zone, and the journal's names may not be in it. Leave it be
-        if (g_pendingMapSet != MapSetName()) {
-            Log("saved on map set %s but the rebuild loaded %s, leaving the field as the game built it",
-                g_pendingMapSet.c_str(), MapSetName().c_str());
+        // the map set doesn't come into it: areas and boxes belong to the
+        // zone and the game swaps sets under them as you walk, so a step
+        // across a swap box before this ran used to skip the whole replay.
+        // A different zone would mean the journal isn't this field's at all
+        if (g_pendingZone != g_worldZone) {
+            Log("saved in zone %d but this is zone %d, leaving the field as the game built it", g_pendingZone,
+                g_worldZone);
             g_pending.clear();
             return;
         }
@@ -2021,13 +2055,18 @@ void Tick() {
                                   kNearFloorAcross &&
                               std::fabs(next.pos.v[1] - footing.ground.v[1]) < kNearFloorUp;
             }
-            if (g_sanctioned.story >= 0 && g_sceneSince < 0 && Steady(rise) && !Carried() && g_idleSolid)
-                Remember(next.pos);
+            // after a scene too, now a save can come after one: the trail is
+            // where a load with no floor at the spot lands you, so it has to be
+            // floor you've walked since
+            if (g_sanctioned.story >= 0 && Steady(rise) && !Carried() && g_idleSolid) Remember(next.pos);
         }
     }
     if (InScene(state) && g_sceneSince < 0 && g_sanctioned.story >= 0) {
         g_sceneSince = state;
         g_notesAtScene = g_notes.load();
+        // ground walked before a scene may be the wrong side of whatever it
+        // changed, so the trail starts again after it
+        g_trailCount = 0;
         // against where it started, not the last station: a chest or a ledge
         // jump on the way flips flags, and those were fine before the scene
         ReadProgress(g_sceneStart);
@@ -2066,7 +2105,7 @@ void Tick() {
         if (const char* why = Drifted(now, g_restartAt))
             Log("restart point at story %d, but %s before free roam, not taking it", g_restartAt.story, why);
         else
-            Sanctify("a restart point");
+            Sanctify("a restart point", false);
     }
     // whatever was sanctioned before belongs to the field that's gone
     if (g_sanction == kLoad || g_sanction == kOurs) g_sanctioned.story = -1;
@@ -2111,8 +2150,10 @@ void Tick() {
     // before the station's load script has even run (Nov 15, a replay there
     // hung the load for good). The script runs, hands off through its own
     // scene, and only then is it you, in free roam, with the calls gone quiet
+    // A field whose scripts never go quiet (a loop toggling something every
+    // second) still gets its turn once free roam has run a while
     if (g_worldCheckWanted && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 1000 &&
-        now - g_lastNoteAt.load() > 1000) {
+        (now - g_lastNoteAt.load() > 1000 || now - g_idleSince > 6000)) {
         Vec4 at{};
         if (Position(PlayerHandle(), at) && !StandIn(at)) {
             g_worldCheckWanted = false;
@@ -2484,7 +2525,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.3, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.5, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2524,7 +2565,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.3";
+    d.version = "0.25.5";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
