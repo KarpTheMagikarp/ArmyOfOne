@@ -43,6 +43,7 @@
 #include <cstring>
 #include <cwctype>
 #include <string>
+#include <map>
 #include <vector>
 
 namespace {
@@ -684,6 +685,15 @@ unsigned g_notesAtScene = 0;
 // the last station
 std::atomic<unsigned> g_lockedNotes{0};
 unsigned g_lockedAtSanction = 0;
+// charas made less charas let go since the last station, by name. One made
+// and let go inside a scene (an event enemy) leaves nothing a load misses
+std::map<std::string, int> g_charaNet;
+
+bool CharasMoved() {
+    for (const auto& [name, net] : g_charaNet)
+        if (net != 0) return true;
+    return false;
+}
 
 int ZoneNumber() {
     unsigned char* party = *g_party;
@@ -741,7 +751,7 @@ void Note(Op op, const char* a, const char* b, int i, int j) {
     LeaveCriticalSection(&g_worldLock);
     g_lastNoteAt = GetTickCount64();
     ++g_notes;
-    if (!Replayable(op)) ++g_lockedNotes;
+    if (!Replayable(op) && op != Op::Chara) ++g_lockedNotes;
     // a station load alone is a few dozen of these
     if (g_debug && g_worldLines < 4000) {
         ++g_worldLines;
@@ -869,7 +879,8 @@ const char* SlotText(const unsigned char* slot) {
 
 void NoteNative(Op op, void* vm, bool on) {
     auto* slots = vm ? *reinterpret_cast<unsigned char**>(static_cast<unsigned char*>(vm) + 0x114) : nullptr;
-    const char* first = nullptr;
+    const char* texts[4]{};
+    int named = 0;
     char raw[160]{};
     int at = 0;
     // which slot is which isn't pinned down for these yet, so the log gets four
@@ -877,14 +888,19 @@ void NoteNative(Op op, void* vm, bool on) {
         const unsigned char* slot = slots + k * 8;
         const unsigned type = *reinterpret_cast<const unsigned short*>(slot);
         if (const char* text = SlotText(slot)) {
-            if (!first) first = text;
+            if (text[0]) texts[named++] = text;
             at += std::snprintf(raw + at, sizeof raw - at, " [%u \"%.16s\"]", type, text);
         } else {
             at += std::snprintf(raw + at, sizeof raw - at, " [%u %#lx]", type,
                                 *reinterpret_cast<const unsigned long*>(slot + 4));
         }
     }
-    Note(op, first, nullptr, on, 0);
+    // createChara_l is (spec, name) and releaseChara (name), so the chara a
+    // create makes is its second string (ch 3: "p_hope" made "ev_en_ho", and
+    // "ev_en_ho" is what got released)
+    const char* target = op == Op::Chara && on ? texts[1] : texts[0];
+    Note(op, target, nullptr, on, 0);
+    if (op == Op::Chara && target) g_charaNet[Name(target)] += on ? 1 : -1;
     Trace("  world: %s %s, slots%s", kOpNames[static_cast<int>(op)], on ? "set" : "cleared", raw);
 }
 
@@ -1507,9 +1523,12 @@ const char* Withheld() {
     // only the few things it can't put back yet, and the zone's own flags,
     // which no save keeps
     if (g_sceneSince >= 0 || now.story != g_sanctioned.story) {
+        if (CharasMoved())
+            return "since you were last at a station a scene made or let go of a character, which a load can't put "
+                   "back yet";
         if (g_lockedNotes.load() != g_lockedAtSanction)
-            return "since you were last at a station a scene made or let go of a character, or changed who you can "
-                   "talk to, which a load can't put back yet";
+            return "since you were last at a station a scene changed who you can talk to or where the AI can walk, "
+                   "which a load can't put back yet";
         if (std::memcmp(now.zone, g_sanctioned.zone, sizeof now.zone) != 0)
             return "a zone flag changed since you were last at a station, and no save keeps those";
     }
@@ -1731,6 +1750,7 @@ void Sanctify(const char* where) {
     g_sanctioned = now;
     g_sceneSince = -1;
     g_lockedAtSanction = g_lockedNotes.load();
+    g_charaNet.clear();
     g_trailCount = 0;
     if (news) Log("story %d at %s", now.story, where);
 }
@@ -2058,8 +2078,15 @@ void Tick() {
             Sanctify("the last station save");
             g_sanction = kNone;
         } else if (g_sanction == kOurs) {
-            Sanctify("a save anywhere load");
-            g_sanction = kNone;
+            // not off the stand-in's idle: the station's load script and its
+            // own scene come after that, and a sanction taken first left the
+            // load's scene standing against it, Save off until the next
+            // station after every load of ours (Vile Peaks, Nov 15). Once the
+            // field's been put back, the state's the one that was saved
+            if (!g_worldCheckWanted) {
+                Sanctify("a save anywhere load");
+                g_sanction = kNone;
+            }
         } else {
             // a plain load counts once you're seen standing at the station it
             // started you at. The stand-in at 0 1.5 -10 isn't you yet
@@ -2457,7 +2484,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.1, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.3, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2497,7 +2524,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.1";
+    d.version = "0.25.3";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

@@ -315,11 +315,16 @@ def test_after_a_story_beat_it_saves_only_what_a_load_can_put_back():
     assert withheld.index("now.ui != g_sanctioned.ui") < withheld.index("g_sceneSince >= 0")
     assert "now.menu, g_sanctioned.menu" in withheld
     beat = withheld[withheld.index("if (g_sceneSince >= 0 || now.story != g_sanctioned.story) {"):]
-    assert "g_lockedNotes.load() != g_lockedAtSanction" in beat and "now.zone, g_sanctioned.zone" in beat
+    assert "CharasMoved()" in beat and "g_lockedNotes.load() != g_lockedAtSanction" in beat
+    assert "now.zone, g_sanctioned.zone" in beat
     assert "Steady(rise)" in withheld and "Carried()" in withheld
     note = source[source.index("void Note(Op op,"):]
     note = note[:note.index("\n}\n")]
-    assert "if (!Replayable(op)) ++g_lockedNotes;" in note
+    assert "if (!Replayable(op) && op != Op::Chara) ++g_lockedNotes;" in note
+    # a chara made and let go inside a scene nets out, by name
+    native = source[source.index("void NoteNative(Op op, void* vm, bool on) {"):]
+    native = native[:native.index("\n}\n")]
+    assert "const char* target = op == Op::Chara && on ? texts[1] : texts[0];" in native
     # the bar and the press go by the same answer
     assert "&& !Withheld();" in source
     assert "if (const char* why = Withheld()) Log(\"save pressed, but %s\", why);" in source
@@ -632,3 +637,15 @@ def test_plain_ground_after_a_hop_still_counts_as_floor():
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
     assert "!Carried() && g_idleSolid)\n                Remember(next.pos);" in tick
+
+
+def test_a_load_of_ours_counts_once_the_field_is_put_back():
+    """
+    sanctioned off the stand-in's idle, the station's own load scene came
+    after and held Save off until the next station after every load of ours
+    (Vile Peaks, Nov 15)
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    ours = source[source.index("} else if (g_sanction == kOurs) {"):]
+    ours = ours[:ours.index("} else {")]
+    assert ours.index("if (!g_worldCheckWanted) {") < ours.index('Sanctify("a save anywhere load");')
