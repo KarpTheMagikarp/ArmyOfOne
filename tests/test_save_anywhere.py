@@ -657,10 +657,11 @@ def test_a_ride_holds_save_back_till_shes_walked_off_it():
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
     # sustained and steeper than 45, so stairs and a hop never latch
-    assert "std::hypot(dx, dz) < std::fabs(stepDy)" in tick
-    # longer than any jump, and being carried isn't one: judged every step it
-    # caught plain running round corners (Vile Peaks, Nov 16)
-    assert "if (g_runMs >= 1200 && std::fabs(g_runDy) >= 1.0f) {" in tick and "|| carried" not in tick
+    assert "std::hypot(dx, dz) < 0.5f * std::fabs(stepDy)" in tick
+    # longer than any jump or climb, and being carried isn't one: judged every
+    # step it caught plain running round corners, and at 1.2 s and 1 m a hop
+    # up onto a junk pile counted (Vile Peaks, Nov 16)
+    assert "if (g_runMs >= 2000 && std::fabs(g_runDy) >= 2.0f) {" in tick and "|| carried" not in tick
     # a load settling her onto the spot isn't a ride
     assert "if (g_landCheckAt) {\n                g_runDy = 0;" in tick
     # pauses, fights, scenes and teleports break a run but never clear the latch
@@ -776,6 +777,8 @@ def test_a_pause_holds_the_load_check_rather_than_restarting_it():
     tick = tick[:tick.index("\n}\n")]
     assert "if (state != kStateFieldPause && state != kStateFieldPauseWait && state != kStateFieldPauseEnd) g_roamMs = 0;" in tick
     assert "if (g_worldCheckWanted && state == kStateFieldIdle && g_roamMs > 1000 &&" in tick
+    # and so does the sanction after it, which kept starting its 2 s over
+    assert "if (g_sanction != kNone && state == kStateFieldIdle && g_roamMs > 2000) {" in tick
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
     assert withheld.index("if (g_worldCheckWanted)") < withheld.index("if (g_sanctioned.story < 0)")

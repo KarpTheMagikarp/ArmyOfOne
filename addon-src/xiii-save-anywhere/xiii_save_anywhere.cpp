@@ -832,10 +832,13 @@ bool FromAreaBox(void* returnAddress) {
     return rva >= kAreaBoxFrom && rva < kAreaBoxTo;
 }
 
+// a replay going through the hooked entries, which notes them itself
+bool g_replaying = false;
+
 // Debug only: the area calls nobody keeps, so a log shows what the engine did
 // on its own and from where
 void TraceEngineArea(const char* what, const char* name, int arg, void* from) {
-    if (!g_debug || !Named(name) || g_worldLines >= 4000) return;
+    if (!g_debug || g_replaying || !Named(name) || g_worldLines >= 4000) return;
     ++g_worldLines;
     Log("  engine: %s %s (%d) from 0x%lx", what, Name(name).c_str(), arg, static_cast<unsigned long>(CallerRva(from)));
 }
@@ -1020,6 +1023,7 @@ void Replay(const Entry& e) {
     char a[16], b[16];
     std::memcpy(a, e.a, 16);
     std::memcpy(b, e.b, 16);
+    g_replaying = true;
     switch (e.op) {
     case Op::AreaOn:
         reinterpret_cast<AreaFn>(g_base + kAreaOnRva)(scene, nullptr, a, e.i);
@@ -1044,8 +1048,10 @@ void Replay(const Entry& e) {
         reinterpret_cast<EncountFn>(g_base + kEncountRva)(e.i);
         break;
     default:
+        g_replaying = false;
         return;
     }
+    g_replaying = false;
     Note(e.op, e.a[0] ? a : nullptr, e.b[0] ? b : nullptr, e.i, e.op == Op::BgAnim ? ReplayMode(e.j) : e.j);
 }
 
@@ -1107,14 +1113,16 @@ bool g_idleSolid = false;
 // stays strictly on floor the game vouched for
 bool g_nearFloor = false;
 constexpr float kNearFloorAcross = 10.0f, kNearFloorUp = 1.0f;
-// rode a lift: a climb or drop steeper than she walks, kept up longer than any
-// jump. Steady only sees the last half second, so a slow lift or one that's
-// just stopped got past it, and the game may call a lift floor. Cleared once
-// she's stood on floor a few steps from where the ride was last seen, so the
-// trail's next point is ground off the lift (Ch 9: a save on the lift after a
-// scene, no lift on load, a fall to the floor below the beat). Being carried
-// doesn't latch it: judged every step it caught plain running round corners
-// and kept Save off all over Vile Peaks (Nov 16). The pause still checks it
+// rode a lift: going near straight up or down (over 60 degrees) for 2 s and
+// 2 m, longer than any jump or climb. At 45 degrees, 1.2 s and 1 m, one of
+// the game's hops up onto a junk pile counted (Vile Peaks, Nov 16). Steady
+// only sees the last half second, so a slow lift or one that's just stopped
+// got past it, and the game may call a lift floor. Cleared once she's stood on
+// floor a few steps from where the ride was last seen, so the trail's next
+// point is ground off the lift (Ch 9: a save on the lift after a scene, no
+// lift on load, a fall to the floor below the beat). Being carried doesn't
+// latch it: judged every step it caught plain running round corners and kept
+// Save off all over Vile Peaks (Nov 16). The pause still checks it
 bool g_rode = false;
 Vec4 g_rodeAt{};
 constexpr float kOffRide = 6.0f;
@@ -2166,7 +2174,7 @@ void Tick() {
             // a gap is a pause, a fight or a scene, and a jump of metres is a
             // teleport (a load, a rescue): neither is a ride. A hop is up then
             // down inside a few hundred ms, so it never builds a run
-            const bool rising = prev.at && dt <= 1000 && std::hypot(dx, dz) < std::fabs(stepDy) &&
+            const bool rising = prev.at && dt <= 1000 && std::hypot(dx, dz) < 0.5f * std::fabs(stepDy) &&
                                 std::fabs(stepDy) * 1000.0f > 0.1f * static_cast<float>(dt) &&
                                 std::hypot(std::hypot(dx, dz), stepDy) < 2.0f;
             if (!rising || (g_runDy > 0) != (stepDy > 0)) {
@@ -2183,7 +2191,7 @@ void Tick() {
                 g_runMs = 0;
             }
             const bool carried = Carried();
-            if (g_runMs >= 1200 && std::fabs(g_runDy) >= 1.0f) {
+            if (g_runMs >= 2000 && std::fabs(g_runDy) >= 2.0f) {
                 if (!g_rode) Log("riding a lift (%.1f %s in %llu ms), Save waits till she's off it", std::fabs(g_runDy),
                                  g_runDy > 0 ? "up" : "down", g_runMs);
                 g_rode = true;
@@ -2260,8 +2268,10 @@ void Tick() {
     }
     // whatever was sanctioned before belongs to the field that's gone
     if (g_sanction == kLoad || g_sanction == kOurs) g_sanctioned.story = -1;
-    // settled for 2 s past the stand-in, the way the land check waits
-    if (g_sanction != kNone && g_idleSince && now - g_idleSince > 2000) {
+    // settled for 2 s past the stand-in, the way the land check waits. Free
+    // roam that a pause only holds: pausing to look for Save right after a
+    // load kept starting the 2 s over (Vile Peaks, Nov 16)
+    if (g_sanction != kNone && state == kStateFieldIdle && g_roamMs > 2000) {
         if (g_sanction == kStation) {
             Log("saved at a station (state %d)", g_stationSaveState.load());
             Moment("saved at a station");
@@ -2291,7 +2301,7 @@ void Tick() {
                 else
                     Log("loaded away from a station, save anywhere waits until you reach one");
                 g_sanction = kNone;
-            } else if (now - g_idleSince > 15000) {
+            } else if (g_roamMs > 15000) {
                 Log("never saw where this load started, save anywhere waits until you reach a station");
                 g_sanction = kNone;
             }
@@ -2683,7 +2693,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.7, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.8, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2723,7 +2733,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.7";
+    d.version = "0.25.8";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
