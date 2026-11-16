@@ -192,7 +192,7 @@
         {
           "source": "assets/mods/xiii-save-anywhere/xiii_save_anywhere.asi",
           "target": "xiii_save_anywhere.asi",
-          "sha256": "7c016c4020326abf8e897a0e35499d0540fc1cff6a23db9d257c2e986cdb3dd1"
+          "sha256": "fbf38e13d1ec2422aa02528ef4de197e24b3c8aa485d21acdb50008d3f335741"
         },
         {
           "source": "assets/mods/xiii-save-anywhere/xiii-save-anywhere.ini",

@@ -1010,6 +1010,15 @@ int g_trackNext = 0;
 // a frame or two into the pause screen, so a live read there always says she
 // isn't on the floor. She can't move while paused, so the last sample stands
 bool g_idleSolid = false;
+// level with the last floor she stood on and close to it, with the bit off.
+// After one of the game's hops the bit stayed off on plain ground until she
+// was well away (Vile Peaks, Nov 15): the floor spot it keeps froze back at
+// the hop while she walked on at the same height. A lift that's taken her up
+// or down is metres off that spot, and Steady and Carried still catch
+// anything moving. Only the save takes this: the trail a fallback lands on
+// stays strictly on floor the game vouched for
+bool g_nearFloor = false;
+constexpr float kNearFloorAcross = 10.0f, kNearFloorUp = 1.0f;
 // which of the two rows is her facing, learnt from her own walking: moving
 // under her own steam she goes the way she faces. Not judged until it's clear
 int g_axisVotes[2]{};
@@ -1504,7 +1513,7 @@ const char* Withheld() {
         if (std::memcmp(now.zone, g_sanctioned.zone, sizeof now.zone) != 0)
             return "a zone flag changed since you were last at a station, and no save keeps those";
     }
-    if (!g_idleSolid)
+    if (!g_idleSolid && !g_nearFloor)
         return "she isn't on the level's own floor (a lift, a platform, mid-air, or not moved since loading)";
     float rise = 0;
     if (!Steady(rise)) return "you were going up or down (a lift, a fall or a jump)";
@@ -1959,6 +1968,7 @@ void Tick() {
     if (state == 1 || state == 2) {
         g_trailCount = 0;
         g_idleSolid = false;
+        g_nearFloor = false;
         // a field change after the point means it's not this field's any more
         g_restartPoint = false;
     }
@@ -1983,7 +1993,14 @@ void Tick() {
             Footing footing;
             // not in the first beat back from a pause either, before the game has
             // put the bit back. The save fires right in that beat
-            if (now - g_idleSince >= 100) g_idleSolid = ReadFooting(PlayerHandle(), footing) && footing.solid;
+            if (now - g_idleSince >= 100) {
+                const bool read = ReadFooting(PlayerHandle(), footing);
+                g_idleSolid = read && footing.solid;
+                g_nearFloor = read && !footing.solid &&
+                              std::hypot(next.pos.v[0] - footing.ground.v[0], next.pos.v[2] - footing.ground.v[2]) <
+                                  kNearFloorAcross &&
+                              std::fabs(next.pos.v[1] - footing.ground.v[1]) < kNearFloorUp;
+            }
             if (g_sanctioned.story >= 0 && g_sceneSince < 0 && Steady(rise) && !Carried() && g_idleSolid)
                 Remember(next.pos);
         }
@@ -2440,7 +2457,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.1, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2480,7 +2497,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25";
+    d.version = "0.25.1";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
