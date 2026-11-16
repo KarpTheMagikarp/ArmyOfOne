@@ -670,6 +670,7 @@ int g_loadedSlot = -1;
 bool g_worldCheckWanted = false;
 // the journal as a save of ours was asked for, for its .where
 std::vector<Entry> g_savedWorld;
+Progress g_atSave;
 int g_savedZone = -1;
 std::string g_savedMapSet = "-";
 int g_worldLines = 0;
@@ -678,6 +679,11 @@ std::atomic<ULONGLONG> g_lastNoteAt{0};
 // every call the journal kept, ever, so a scene can tell whether it touched the field
 std::atomic<unsigned> g_notes{0};
 unsigned g_notesAtScene = 0;
+// the calls a load can't put back yet (a chara made or let go, who you can
+// talk to, a path edge), counted the same way, and where the count stood at
+// the last station
+std::atomic<unsigned> g_lockedNotes{0};
+unsigned g_lockedAtSanction = 0;
 
 int ZoneNumber() {
     unsigned char* party = *g_party;
@@ -735,6 +741,7 @@ void Note(Op op, const char* a, const char* b, int i, int j) {
     LeaveCriticalSection(&g_worldLock);
     g_lastNoteAt = GetTickCount64();
     ++g_notes;
+    if (!Replayable(op)) ++g_lockedNotes;
     // a station load alone is a few dozen of these
     if (g_debug && g_worldLines < 4000) {
         ++g_worldLines;
@@ -1479,14 +1486,23 @@ const char* Withheld() {
     if (g_sanctioned.story < 0) return "you haven't been at a station since this field started";
     static Progress now;
     ReadProgress(now);
-    static char why[96];
-    if (g_sceneSince >= 0) {
-        std::snprintf(why, sizeof why, "a scene ran (state %d) since you were last at a station", g_sceneSince);
-        return why;
-    }
-    if (const char* moved = Moved(now)) {
-        std::snprintf(why, sizeof why, "%s since you were last at a station", moved);
-        return why;
+    // a sequence still running, whatever came before
+    if (now.ui != g_sanctioned.ui) return "a sequence has the field UI off";
+    if (std::memcmp(now.menu, g_sanctioned.menu, sizeof now.menu) != 0) return "a sequence has the menus locked";
+    if (g_worldCheckWanted) return "the field's still being put back after the load";
+    // a story beat or a scene since the last station used to be the end of
+    // it, because a load only rebuilds the station's side of the story. The
+    // journal carries everything the scripts did to the field since, and a
+    // load puts back what the rebuild misses (Vile Peaks, Nov 15: every
+    // difference a terminal's own reload left was one of those). So now it's
+    // only the few things it can't put back yet, and the zone's own flags,
+    // which no save keeps
+    if (g_sceneSince >= 0 || now.story != g_sanctioned.story) {
+        if (g_lockedNotes.load() != g_lockedAtSanction)
+            return "since you were last at a station a scene made or let go of a character, or changed who you can "
+                   "talk to, which a load can't put back yet";
+        if (std::memcmp(now.zone, g_sanctioned.zone, sizeof now.zone) != 0)
+            return "a zone flag changed since you were last at a station, and no save keeps those";
     }
     if (!g_idleSolid)
         return "she isn't on the level's own floor (a lift, a platform, mid-air, or not moved since loading)";
@@ -1510,6 +1526,7 @@ void StartSave() {
         return;
     }
     g_getSavePoint(g_savedPoint.bytes);
+    ReadProgress(g_atSave);
     g_savedWorld = WorldNow();
     g_savedZone = g_worldZone;
     g_savedMapSet = MapSetName();
@@ -1537,7 +1554,7 @@ void FinishSave() {
     // the save stands as a plain one and loads at its station
     static Progress after;
     ReadProgress(after);
-    if (const char* moved = g_sceneSince >= 0 ? "a scene ran" : Moved(after)) {
+    if (const char* moved = Drifted(after, g_atSave)) {
         Log("slot %d saved, but %s while saving, so it keeps no spot", written.slot, moved);
         return;
     }
@@ -1704,6 +1721,7 @@ void Sanctify(const char* where) {
     const bool news = g_sanctioned.story < 0 || Moved(now) || g_sceneSince >= 0;
     g_sanctioned = now;
     g_sceneSince = -1;
+    g_lockedAtSanction = g_lockedNotes.load();
     g_trailCount = 0;
     if (news) Log("story %d at %s", now.story, where);
 }
@@ -1976,7 +1994,7 @@ void Tick() {
         // against where it started, not the last station: a chest or a ledge
         // jump on the way flips flags, and those were fine before the scene
         ReadProgress(g_sceneStart);
-        Log("scene (state %d), save anywhere waits for the next station", state);
+        Log("scene (state %d)", state);
     }
     if (InScene(state)) g_wasScene = true;
     else if (g_wasScene && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 500) {
@@ -2422,7 +2440,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.24.4, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2462,7 +2480,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.24.4";
+    d.version = "0.25";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

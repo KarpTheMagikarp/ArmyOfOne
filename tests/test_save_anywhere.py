@@ -298,25 +298,28 @@ def test_a_load_of_ours_lands_through_the_spawn_alone_and_still_checks_for_a_fal
     assert "NextFallback(" in body
 
 
-def test_it_only_saves_a_story_state_a_station_could_have():
+def test_after_a_story_beat_it_saves_only_what_a_load_can_put_back():
     """
     a save mid-sequence (after a beat, before the station that follows it)
-    reloaded into a fight that never led anywhere. So Save stays off the bar
-    once the story's moved past where the last load or station save had it
+    reloaded into a fight that never led anywhere, so for a while Save waited
+    for the next station after any beat. With the world journal a load puts
+    back what the station's rebuild misses (every difference a terminal's own
+    reload left in Vile Peaks was one of those, Nov 15), so after a beat it's
+    only held back by what can't be put back yet: a chara made or let go, a
+    talk change, a path edge, or a zone flag
     """
     source = SOURCE.read_text(encoding="utf-8")
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
-    assert "Moved(now)" in withheld and "Steady(rise)" in withheld
-    # a scene since the last station is what holds it back first
-    assert withheld.index("g_sceneSince >= 0") < withheld.index("Moved(now)")
-    moved = source[source.index("const char* Moved(const Progress& now) {"):]
-    moved = moved[:moved.index("\n}\n")]
-    for check in ("now.story != g_sanctioned.story", "now.ui != g_sanctioned.ui", "now.menu, g_sanctioned.menu"):
-        assert check in moved, check
-    # a chest or a jump up a ledge flips event flags, so those are logged, not gated
-    for logged in ("now.flags", "now.work", "now.zone"):
-        assert logged not in moved, logged
+    # a sequence still running holds it back whatever came before
+    assert withheld.index("now.ui != g_sanctioned.ui") < withheld.index("g_sceneSince >= 0")
+    assert "now.menu, g_sanctioned.menu" in withheld
+    beat = withheld[withheld.index("if (g_sceneSince >= 0 || now.story != g_sanctioned.story) {"):]
+    assert "g_lockedNotes.load() != g_lockedAtSanction" in beat and "now.zone, g_sanctioned.zone" in beat
+    assert "Steady(rise)" in withheld and "Carried()" in withheld
+    note = source[source.index("void Note(Op op,"):]
+    note = note[:note.index("\n}\n")]
+    assert "if (!Replayable(op)) ++g_lockedNotes;" in note
     # the bar and the press go by the same answer
     assert "&& !Withheld();" in source
     assert "if (const char* why = Withheld()) Log(\"save pressed, but %s\", why);" in source
@@ -371,7 +374,7 @@ def test_the_guard_is_asked_again_as_the_save_fires_and_after_it():
     assert "if (const char* why = Withheld()) {" in source[fire - 400:fire]
     finish = source[source.index("void FinishSave() {"):]
     finish = finish[:finish.index("\n}\n")]
-    assert finish.index("Moved(after)") < finish.index("WriteWhere(written);")
+    assert finish.index("Drifted(after, g_atSave)") < finish.index("WriteWhere(written);")
 
 
 def test_it_never_writes_to_a_save():
