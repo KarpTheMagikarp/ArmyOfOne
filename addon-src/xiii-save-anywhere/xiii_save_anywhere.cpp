@@ -238,10 +238,21 @@ constexpr unsigned char kReleaseCharaHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x3
 constexpr unsigned char kTalkOnHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00};
 constexpr unsigned char kTalkOffHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0xA1, 0x84, 0x5A, 0x6E, 0x02};
 constexpr unsigned char kPathEdgeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x8B, 0x45, 0x08};
+// a cutscene's data in or out: thiscall on [[0x27fce04]+8] (name, pack or
+// null, 0, load), ret 0x10. Resource.load/unloadCutSceneScheduleData pass no
+// pack, the PackData pair a 3 letter one ("a00"), and so do the map's
+// event-load boxes. A cutscene only plays if its schedule's in, and a callback
+// often loads the next one's for a trigger further on: ac_hiku_011's loads
+// ac_hiku_013's for the lift button, and no station's load script ever does.
+// Without it the button started a cutscene that never came, a softlock (Ch 9,
+// Nov 19)
+constexpr DWORD kCutsceneRva = 0x47E80, kCutsceneHolderRva = 0x23FCE04;
+constexpr unsigned char kCutsceneHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x28, 0x02, 0x00, 0x00};
 // who's calling. The engine toggles areas on its own too: around fights
 // (0x814B90), refreshing enemy groups (0x5AEBF0), and from the area boxes the
 // map data puts where one stretch of a level hands over to the next
-// (0x5C88D0, four groups a box, all on or all off). The natives count, the
+// (0x5C88D0, four groups a box, all on or all off, plus its helpers up to
+// 0x5C9AA5 that preload cutscenes and chara sets). The natives count, the
 // script calling, plus the two spots a cutscene's own track plays a bg anim
 // from, and the area boxes: those turn on the next stretch's gr_fa group,
 // which is where its save station's terminal lives. Left out, a load past the
@@ -250,7 +261,7 @@ constexpr unsigned char kPathEdgeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0
 // The fights and enemy refreshes keep their own tally, and forcing one of
 // those behind the engine's back left a terminal off for good (Nov 15)
 constexpr DWORD kNativesFrom = 0x7BA4E0, kNativesTo = 0x7EBA00;
-constexpr DWORD kAreaBoxFrom = 0x1C88D0, kAreaBoxTo = 0x1C93F8;
+constexpr DWORD kAreaBoxFrom = 0x1C88D0, kAreaBoxTo = 0x1C9AA5;
 constexpr DWORD kCutsceneBgAnimA = 0x71EF14, kCutsceneBgAnimB = 0x71F3AF;
 // 99 save slots, and anything smaller than this isn't a whole save
 constexpr int kSlots = 99, kSaveMinBytes = 0x10000;
@@ -626,14 +637,14 @@ void LogProgress(const char* when, const Progress& now) {
 // side of the story. So every one of those calls since the field started is
 // kept here, the latest per target, and goes in the .where with the spot.
 // Loading puts back whatever the rebuild didn't, through the same calls
-enum class Op : unsigned char { AreaOn, AreaFade, AreaOff, Object, BgAnim, Layout, Encount, Chara, Talk, Edge };
-constexpr const char* kOpNames[] = {"area on", "area fade in", "area off", "box", "bg anim",
-                                    "layout", "encounters", "chara", "talk", "path edge"};
+enum class Op : unsigned char { AreaOn, AreaFade, AreaOff, Object, BgAnim, Layout, Encount, Chara, Talk, Edge, Cutscene };
+constexpr const char* kOpNames[] = {"area on", "area fade in", "area off", "box", "bg anim", "layout",
+                                    "encounters", "chara", "talk", "path edge", "cutscene"};
 
 struct Entry {
     Op op = Op::AreaOn;
     char a[16]{};  // the target: area, box, bg object, layout piece, chara
-    char b[16]{};  // a bg anim's motion, a bg model's second name
+    char b[16]{};  // a bg anim's motion, a bg model's second name, a cutscene's pack
     int i = 0;     // flags, live, shown, on
     int j = 0;     // a bg anim's mode, 1 when a layout's set is the fixed one or an area box toggled an area
     unsigned seq = 0;  // which note it was, this session only
@@ -646,7 +657,8 @@ int Kind(Op op) {
     case Op::BgAnim: return 2;
     case Op::Layout: return 3;
     case Op::Encount: return 4;
-    default: return 5 + static_cast<int>(op);
+    case Op::Cutscene: return 5;
+    default: return 6 + static_cast<int>(op);
     }
 }
 
@@ -654,6 +666,7 @@ bool SameTarget(const Entry& x, const Entry& y) {
     if (Kind(x.op) != Kind(y.op)) return false;
     if (x.op == Op::Encount) return true;
     if (std::memcmp(x.a, y.a, 16) != 0) return false;
+    if (x.op == Op::Cutscene) return std::memcmp(x.b, y.b, 16) == 0;
     return x.op != Op::Layout || (x.j == y.j && std::memcmp(x.b, y.b, 16) == 0);
 }
 
@@ -666,7 +679,7 @@ bool SameEffect(const Entry& x, const Entry& y) {
 }
 
 // what can be put back: the rest is only kept so the log can say it happened
-bool Replayable(Op op) { return Kind(op) <= 4; }
+bool Replayable(Op op) { return Kind(op) <= 5; }
 
 // the game thread writes it, the save writer and reader may not run there
 CRITICAL_SECTION g_worldLock;
@@ -750,6 +763,10 @@ void Describe(const Entry& e, char* out, size_t size) {
     case Op::Encount:
         std::snprintf(out, size, "%s %s", kOpNames[static_cast<int>(e.op)], e.i ? "on" : "off");
         break;
+    case Op::Cutscene:
+        std::snprintf(out, size, "%s %s%s%s %s", kOpNames[static_cast<int>(e.op)], Name(e.a).c_str(), e.b[0] ? " pack " : "",
+                      e.b[0] ? Name(e.b).c_str() : "", e.i ? "in" : "out");
+        break;
     default:
         std::snprintf(out, size, "%s %s (%d)%s", kOpNames[static_cast<int>(e.op)], Name(e.a).c_str(), e.i,
                       FromBox(e) ? " by an area box" : "");
@@ -804,6 +821,7 @@ using LayoutFn = int(__fastcall*)(void*, void*, const char*, const void*, int);
 using EncountFn = int(__cdecl*)(int);
 using MapSetFn = int(__fastcall*)(void*, void*, const char*);
 using RetryFn = int(__fastcall*)(void*, void*);
+using CutsceneFn = int(__fastcall*)(void*, void*, const char*, const char*, int, int);
 using NativeFn = int(__cdecl*)(void*);
 
 AreaFn g_areaOn = nullptr, g_areaFade = nullptr, g_areaOff = nullptr, g_object = nullptr;
@@ -812,6 +830,7 @@ LayoutFn g_layout = nullptr;
 EncountFn g_encount = nullptr;
 MapSetFn g_mapSet = nullptr;
 RetryFn g_retry = nullptr;
+CutsceneFn g_cutscene = nullptr;
 NativeFn g_createChara = nullptr, g_releaseChara = nullptr, g_talkOn = nullptr, g_talkOff = nullptr,
          g_pathEdge = nullptr;
 
@@ -932,6 +951,19 @@ int __fastcall RetryHook(void* self, void* edx) {
     return g_retry(self, edx);
 }
 
+// a script's or an event-load box's loads, and everyone's unloads: a
+// cutscene's player drops its own data once it's done, and that's what was in
+// at the save
+int __fastcall CutsceneHook(void* loader, void* edx, const char* name, const char* pack, int arg, int load) {
+    void* from = __builtin_return_address(0);
+    const bool kept = Named(name) && (!load || FromScript(from) || FromAreaBox(from));
+    char which[16]{};
+    if (kept && pack) std::memcpy(which, pack, strnlen(pack, 3));
+    const int out = g_cutscene(loader, edx, name, pack, arg, load);
+    if (kept) Note(Op::Cutscene, name, which, load, arg);
+    return out;
+}
+
 // a native's string arg, if that slot holds a readable one
 const char* SlotText(const unsigned char* slot) {
     const char* text = *reinterpret_cast<const char* const*>(slot + 4);
@@ -1047,6 +1079,16 @@ void Replay(const Entry& e) {
     case Op::Encount:
         reinterpret_cast<EncountFn>(g_base + kEncountRva)(e.i);
         break;
+    case Op::Cutscene: {
+        auto* holder = *reinterpret_cast<unsigned char**>(g_base + kCutsceneHolderRva);
+        void* loader = holder ? *reinterpret_cast<void**>(holder + 8) : nullptr;
+        if (!loader) {
+            g_replaying = false;
+            return;
+        }
+        reinterpret_cast<CutsceneFn>(g_base + kCutsceneRva)(loader, nullptr, a, b[0] ? b : nullptr, e.j, e.i);
+        break;
+    }
     default:
         g_replaying = false;
         return;
@@ -1069,6 +1111,9 @@ std::vector<Entry> Missing(const std::vector<Entry>& want, const std::vector<Ent
             if (other) ++*other;
             continue;
         }
+        // a cutscene's data only ever goes in: the rebuild knows what its own
+        // area needs, and one the save had dropped costs nothing loaded
+        if (w.op == Op::Cutscene && !w.i) continue;
         auto it = std::find_if(have.begin(), have.end(), [&](const Entry& h) { return SameTarget(h, w); });
         if (FromBox(w) && it != have.end() && FromBox(*it) && it->seq > walked) continue;
         if (it == have.end() || !SameEffect(*it, w)) out.push_back(w);
@@ -1077,11 +1122,11 @@ std::vector<Entry> Missing(const std::vector<Entry>& want, const std::vector<Ent
 }
 
 void LogMissing(const char* what, const std::vector<Entry>& missing, int other) {
-    int counts[5]{};
+    int counts[6]{};
     for (const Entry& e : missing) ++counts[Kind(e.op)];
-    Log("%s: %u differ from the rebuild (areas %d, boxes %d, bg anims %d, layout %d, encounters %d), %d that can't "
-        "be put back", what, static_cast<unsigned>(missing.size()), counts[0], counts[1], counts[2], counts[3],
-        counts[4], other);
+    Log("%s: %u differ from the rebuild (areas %d, boxes %d, bg anims %d, layout %d, encounters %d, cutscenes %d), "
+        "%d that can't be put back", what, static_cast<unsigned>(missing.size()), counts[0], counts[1], counts[2],
+        counts[3], counts[4], counts[5], other);
     int shown = 0;
     for (const Entry& e : missing) {
         if (!g_debug && shown >= 12) break;
@@ -1411,7 +1456,7 @@ bool ReadWorld(FILE* file, std::vector<Entry>& out, int* zone = nullptr, std::st
         Entry e;
         if (fscanf_s(file, "%d %39s %39s %d %d", &op, a, static_cast<unsigned>(sizeof a), b,
                      static_cast<unsigned>(sizeof b), &e.i, &e.j) != 5 ||
-            op < 0 || op > static_cast<int>(Op::Edge) || std::strlen(a) != 32 || std::strlen(b) != 32 ||
+            op < 0 || op > static_cast<int>(Op::Cutscene) || std::strlen(a) != 32 || std::strlen(b) != 32 ||
             !Unhex(a, e.a) || !Unhex(b, e.b)) {
             out.clear();
             return false;
@@ -2624,6 +2669,7 @@ bool Verify() {
         {kTalkOnRva, kTalkOnHead, sizeof kTalkOnHead},
         {kTalkOffRva, kTalkOffHead, sizeof kTalkOffHead},
         {kPathEdgeRva, kPathEdgeHead, sizeof kPathEdgeHead},
+        {kCutsceneRva, kCutsceneHead, sizeof kCutsceneHead},
     };
     // SteamStub decrypts the code before the game's entry point, and NovaFix
     // loads us after that, but waiting on the bytes costs nothing if not
@@ -2678,7 +2724,7 @@ bool HookWorld() {
            HookAt(kRetryRva, &RetryHook, g_retry) && HookAt(kCreateCharaRva, &CreateCharaHook, g_createChara) &&
            HookAt(kReleaseCharaRva, &ReleaseCharaHook, g_releaseChara) &&
            HookAt(kTalkOnRva, &TalkOnHook, g_talkOn) && HookAt(kTalkOffRva, &TalkOffHook, g_talkOff) &&
-           HookAt(kPathEdgeRva, &PathEdgeHook, g_pathEdge);
+           HookAt(kPathEdgeRva, &PathEdgeHook, g_pathEdge) && HookAt(kCutsceneRva, &CutsceneHook, g_cutscene);
 }
 
 // the log appends every session, so past 1 MB the old one steps aside as .1
@@ -2693,7 +2739,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.8, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.9, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2733,7 +2779,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.8";
+    d.version = "0.25.9";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

@@ -742,7 +742,7 @@ def test_the_area_boxes_groups_come_back_with_the_spot():
     up at the station after all, the station's own groups go back
     """
     source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr DWORD kAreaBoxFrom = 0x1C88D0, kAreaBoxTo = 0x1C93F8;" in source
+    assert "constexpr DWORD kAreaBoxFrom = 0x1C88D0, kAreaBoxTo = 0x1C9AA5;" in source
     on = source[source.index("int __fastcall AreaOnHook("):]
     on = on[:on.index("\n}\n")]
     assert "Note(Op::AreaOn, name, nullptr, flags, box);" in on
@@ -782,3 +782,30 @@ def test_a_pause_holds_the_load_check_rather_than_restarting_it():
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
     assert withheld.index("if (g_worldCheckWanted)") < withheld.index("if (g_sanctioned.story < 0)")
+
+
+def test_a_cutscene_a_callback_loaded_for_later_comes_back_with_the_save():
+    """
+    ac_hiku_011's callback loads ac_hiku_013's schedule for the lift button
+    and no station's load script does, so a save between them loaded with the
+    button live and nothing to play: pressing it waited on a cutscene that
+    never came, a softlock (Ch 9, Nov 19). Cutscene data in and out goes in the
+    journal, scripts' and the event-load boxes' loads and anyone's unloads,
+    and a load only ever puts data back in
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kCutsceneRva = 0x47E80, kCutsceneHolderRva = 0x23FCE04;" in source
+    assert "{kCutsceneRva, kCutsceneHead, sizeof kCutsceneHead}," in source
+    assert "HookAt(kCutsceneRva, &CutsceneHook, g_cutscene)" in source
+    hook = source[source.index("int __fastcall CutsceneHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "(!load || FromScript(from) || FromAreaBox(from))" in hook
+    assert "case Op::Cutscene: return 5;" in source and "bool Replayable(Op op) { return Kind(op) <= 5; }" in source
+    missing = source[source.index("std::vector<Entry> Missing("):]
+    missing = missing[:missing.index("\n}\n")]
+    assert "if (w.op == Op::Cutscene && !w.i) continue;" in missing
+    replay = source[source.index("void Replay(const Entry& e) {"):]
+    replay = replay[:replay.index("\n}\n")]
+    assert "case Op::Cutscene: {" in replay and "g_base + kCutsceneRva" in replay
+    # a newer op in an older reader is a bad file, not a crash
+    assert "op < 0 || op > static_cast<int>(Op::Cutscene) ||" in source

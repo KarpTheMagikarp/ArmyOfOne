@@ -57,6 +57,7 @@ SITES = (
     ("talk set", 0x7CC580, 9),
     ("talk clear", 0x7CC690, 11),
     ("path edge", 0x7E1050, 9),
+    ("cutscene data", 0x47E80, 9),
 )
 
 
