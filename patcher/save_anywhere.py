@@ -58,6 +58,10 @@ SITES = (
     ("talk clear", 0x7CC690, 11),
     ("path edge", 0x7E1050, 9),
     ("cutscene data", 0x47E80, 9),
+    ("chara set in", 0x471E0, 9),
+    ("chara set out", 0x48070, 9),
+    ("chara in", 0x475F0, 9),
+    ("chara out", 0x47FC0, 9),
 )
 
 

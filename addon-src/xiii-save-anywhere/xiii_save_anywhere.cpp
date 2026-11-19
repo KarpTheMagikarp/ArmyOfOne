@@ -247,6 +247,12 @@ constexpr unsigned char kPathEdgeHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0
 // Without it the button started a cutscene that never came, a softlock (Ch 9,
 // Nov 19)
 constexpr DWORD kCutsceneRva = 0x47E80, kCutsceneHolderRva = 0x23FCE04;
+// the same loader's charas: a set in (name, 0) and out (name), one chara in
+// and out the same way. Scripts and the event-load boxes preload these for
+// what's coming too. Only traced for now, with Debug on, to see whether a
+// load ever misses one (Eden's crowds, Nautilus)
+constexpr DWORD kCharaSetInRva = 0x471E0, kCharaSetOutRva = 0x48070, kCharaInRva = 0x475F0, kCharaOutRva = 0x47FC0;
+constexpr unsigned char kLoaderHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x14, 0x02, 0x00, 0x00};
 constexpr unsigned char kCutsceneHead[] = {0x55, 0x8B, 0xEC, 0x81, 0xEC, 0x28, 0x02, 0x00, 0x00};
 // who's calling. The engine toggles areas on its own too: around fights
 // (0x814B90), refreshing enemy groups (0x5AEBF0), and from the area boxes the
@@ -822,6 +828,8 @@ using EncountFn = int(__cdecl*)(int);
 using MapSetFn = int(__fastcall*)(void*, void*, const char*);
 using RetryFn = int(__fastcall*)(void*, void*);
 using CutsceneFn = int(__fastcall*)(void*, void*, const char*, const char*, int, int);
+using LoadFn = int(__fastcall*)(void*, void*, const char*, int);
+using UnloadFn = int(__fastcall*)(void*, void*, const char*);
 using NativeFn = int(__cdecl*)(void*);
 
 AreaFn g_areaOn = nullptr, g_areaFade = nullptr, g_areaOff = nullptr, g_object = nullptr;
@@ -831,6 +839,8 @@ EncountFn g_encount = nullptr;
 MapSetFn g_mapSet = nullptr;
 RetryFn g_retry = nullptr;
 CutsceneFn g_cutscene = nullptr;
+LoadFn g_charaSetIn = nullptr, g_charaIn = nullptr;
+UnloadFn g_charaSetOut = nullptr, g_charaOut = nullptr;
 NativeFn g_createChara = nullptr, g_releaseChara = nullptr, g_talkOn = nullptr, g_talkOff = nullptr,
          g_pathEdge = nullptr;
 
@@ -962,6 +972,32 @@ int __fastcall CutsceneHook(void* loader, void* edx, const char* name, const cha
     const int out = g_cutscene(loader, edx, name, pack, arg, load);
     if (kept) Note(Op::Cutscene, name, which, load, arg);
     return out;
+}
+
+void TraceLoad(const char* what, const char* name, void* from) {
+    if (!g_debug || !Named(name) || g_worldLines >= 4000) return;
+    ++g_worldLines;
+    Log("  resource: %s %s from 0x%lx", what, Name(name).c_str(), static_cast<unsigned long>(CallerRva(from)));
+}
+
+int __fastcall CharaSetInHook(void* loader, void* edx, const char* name, int arg) {
+    TraceLoad("chara set in", name, __builtin_return_address(0));
+    return g_charaSetIn(loader, edx, name, arg);
+}
+
+int __fastcall CharaSetOutHook(void* loader, void* edx, const char* name) {
+    TraceLoad("chara set out", name, __builtin_return_address(0));
+    return g_charaSetOut(loader, edx, name);
+}
+
+int __fastcall CharaInHook(void* loader, void* edx, const char* name, int arg) {
+    TraceLoad("chara in", name, __builtin_return_address(0));
+    return g_charaIn(loader, edx, name, arg);
+}
+
+int __fastcall CharaOutHook(void* loader, void* edx, const char* name) {
+    TraceLoad("chara out", name, __builtin_return_address(0));
+    return g_charaOut(loader, edx, name);
 }
 
 // a native's string arg, if that slot holds a readable one
@@ -2670,6 +2706,10 @@ bool Verify() {
         {kTalkOffRva, kTalkOffHead, sizeof kTalkOffHead},
         {kPathEdgeRva, kPathEdgeHead, sizeof kPathEdgeHead},
         {kCutsceneRva, kCutsceneHead, sizeof kCutsceneHead},
+        {kCharaSetInRva, kLoaderHead, sizeof kLoaderHead},
+        {kCharaSetOutRva, kLoaderHead, sizeof kLoaderHead},
+        {kCharaInRva, kLoaderHead, sizeof kLoaderHead},
+        {kCharaOutRva, kLoaderHead, sizeof kLoaderHead},
     };
     // SteamStub decrypts the code before the game's entry point, and NovaFix
     // loads us after that, but waiting on the bytes costs nothing if not
@@ -2724,7 +2764,10 @@ bool HookWorld() {
            HookAt(kRetryRva, &RetryHook, g_retry) && HookAt(kCreateCharaRva, &CreateCharaHook, g_createChara) &&
            HookAt(kReleaseCharaRva, &ReleaseCharaHook, g_releaseChara) &&
            HookAt(kTalkOnRva, &TalkOnHook, g_talkOn) && HookAt(kTalkOffRva, &TalkOffHook, g_talkOff) &&
-           HookAt(kPathEdgeRva, &PathEdgeHook, g_pathEdge) && HookAt(kCutsceneRva, &CutsceneHook, g_cutscene);
+           HookAt(kPathEdgeRva, &PathEdgeHook, g_pathEdge) && HookAt(kCutsceneRva, &CutsceneHook, g_cutscene) &&
+           HookAt(kCharaSetInRva, &CharaSetInHook, g_charaSetIn) &&
+           HookAt(kCharaSetOutRva, &CharaSetOutHook, g_charaSetOut) && HookAt(kCharaInRva, &CharaInHook, g_charaIn) &&
+           HookAt(kCharaOutRva, &CharaOutHook, g_charaOut);
 }
 
 // the log appends every session, so past 1 MB the old one steps aside as .1
