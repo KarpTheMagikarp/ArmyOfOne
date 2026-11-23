@@ -670,7 +670,7 @@ def test_a_ride_holds_save_back_till_shes_walked_off_it():
     assert tick.index("offRide") < tick.index("Remember(next.pos)")
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
-    assert "if (g_rode) return" in withheld
+    assert "if (g_rode)\n        return g_rodeByScene ?" in withheld
     assert "if (g_trailCount == 0 && (g_sceneSince >= 0 || now.story != g_sanctioned.story))" in withheld
     sanctify = source[source.index("void Sanctify("):]
     sanctify = sanctify[:sanctify.index("\n}\n")]
@@ -809,3 +809,44 @@ def test_a_cutscene_a_callback_loaded_for_later_comes_back_with_the_save():
     assert "case Op::Cutscene: {" in replay and "g_base + kCutsceneRva" in replay
     # a newer op in an older reader is a bad file, not a crash
     assert "op < 0 || op > static_cast<int>(Op::Cutscene) ||" in source
+
+
+def test_a_load_holds_her_on_the_spot_till_the_field_is_put_back():
+    """
+    Ch 9: a save on the lift the button cutscene brought down. On load the
+    lift wasn't back yet, she dropped 11 m into the fight below, and the
+    fallback moves couldn't take mid-fight. Till the replay has run a drop
+    puts her back on the spot, and the drop check starts the moment it's her,
+    not 2.5 s after the spawn
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    land = source[source.index("void TickLoad(int state) {"):]
+    land = land[:land.index("\n}\n")]
+    hold = land.index("if (g_worldCheckWanted && g_fallbackAt < 0 && flat < 3.0f && drop > 1.0f) {")
+    assert hold < land.index("NextFallback(handle, now, why);")
+    assert "g_setPosFlash(handle, g_landTarget.v, 0);" in land[hold:hold + 400]
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    real = tick.index("g_realFrom = g_notes.load();")
+    assert "if (g_landCheckAt) g_landCheckAt = now;" in tick[real:real + 400]
+
+
+def test_a_scene_that_moves_her_holds_save_till_she_walks_off():
+    """
+    the button cutscene stood her on the lift it brought down and the game
+    calls a parked lift floor, so the footing check passed a save on it. A
+    scene that moves her over 2 m latches the ride guard where it left her:
+    6 m of floor before Save, and nothing closer on the trail
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "g_sceneFromRead = Position(PlayerHandle(), g_sceneFrom);" in tick
+    end = tick.index('Moment("back in free roam after a scene");')
+    after = tick[end:end + 1600]
+    # a scene that changed nothing doesn't latch: the no-op check comes first
+    assert after.index("g_sceneSince = -1;") < after.index("g_rodeByScene = true;")
+    assert "std::hypot(at.v[0] - g_sceneFrom.v[0], at.v[2] - g_sceneFrom.v[2]) > 2.0f" in after
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (g_rode)") < withheld.index("if (!g_idleSolid")

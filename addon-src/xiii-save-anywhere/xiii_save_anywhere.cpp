@@ -1108,9 +1108,12 @@ void Replay(const Entry& e) {
     case Op::Object:
         reinterpret_cast<AreaFn>(g_base + kObjectRva)(scene, nullptr, a, e.i);
         break;
-    case Op::BgAnim:
-        reinterpret_cast<BgAnimFn>(g_base + kBgAnimRva)(scene, nullptr, a, e.i, b, ReplayMode(e.j));
+    case Op::BgAnim: {
+        const int took = reinterpret_cast<BgAnimFn>(g_base + kBgAnimRva)(scene, nullptr, a, e.i, b, ReplayMode(e.j));
+        if (g_debug) Log("  bg anim %s %s back at mode %d: %s", Name(a).c_str(), Name(b).c_str(), ReplayMode(e.j),
+                         (took & 0xFF) ? "took" : "refused");
         break;
+    }
     case Op::Layout:
         reinterpret_cast<LayoutFn>(g_base + kLayoutRva)(scene, nullptr, a,
                                                         e.j ? reinterpret_cast<const void*>(g_base + kLayoutSetRva) : b, e.i);
@@ -2828,7 +2831,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.9, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.10, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2868,7 +2871,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.9";
+    d.version = "0.25.10";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
