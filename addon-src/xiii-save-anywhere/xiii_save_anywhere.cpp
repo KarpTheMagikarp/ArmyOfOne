@@ -435,6 +435,12 @@ int g_fallbackCount = 0, g_fallbackAt = -1;
 ULONGLONG g_settleFrom = 0;
 bool g_settling = false;
 int g_settles = 0;
+// spots whose floor never came, so the next try isn't on the same piece
+Vec4 g_failed[8]{};
+int g_failedCount = 0;
+// the load ended up at the station or nowhere: whatever state that is, it
+// isn't one to write over a good save with
+bool g_lostLanding = false;
 
 void* Zone() { return *g_zoneSlot; }
 
@@ -1706,6 +1712,7 @@ bool CanSave() {
 const char* Withheld() {
     if (!CanSave()) return "this area's save point isn't loaded";
     if (g_worldCheckWanted) return "the field's still being put back after the load";
+    if (g_lostLanding) return "the load couldn't put her back where it was saved, Save waits till she's at a station";
     if (g_sanctioned.story < 0) return "you haven't been at a station since this field started";
     static Progress now;
     ReadProgress(now);
@@ -1862,6 +1869,7 @@ void TryArm(int marker) {
     g_roamMs = 0;
     g_realFrom = ~0u;
     g_spotUsed = false;
+    g_lostLanding = false;
     g_rebuildAreas.clear();
     g_pendingWanted = false;
     g_pendingMapSet = "-";
@@ -1904,6 +1912,7 @@ void TryArm(int marker) {
         g_settleFrom = 0;
         g_settling = false;
         g_settles = 0;
+        g_failedCount = 0;
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
         Log("slot %d: start marker %d answers with %.2f %.2f %.2f, %u things to check the field for once it's up",
@@ -1982,7 +1991,20 @@ void Sanctify(const char* where, bool baseline = true) {
     }
     g_trailCount = 0;
     g_rode = false;
+    g_lostLanding = false;
     if (news) Log("story %d at %s", now.story, where);
+}
+
+// a missing floor is a whole piece missing (a lift's apron, a bridge, a
+// platform), so a spot within this of one that already failed is on it too.
+// Ch 9, Nov 22: the three newest trail spots were all on the apron by the
+// button and she went through each in turn
+constexpr float kSamePiece = 5.0f;
+
+bool OnFailedPiece(const Vec4& at) {
+    for (int i = 0; i < g_failedCount; ++i)
+        if (std::hypot(at.v[0] - g_failed[i].v[0], at.v[2] - g_failed[i].v[2]) < kSamePiece) return true;
+    return false;
 }
 
 // every frame from her first real frame after the spawn. This is the check
@@ -1990,21 +2012,29 @@ void Sanctify(const char* where, bool baseline = true) {
 // there in the rebuilt field you stand on it, and if it isn't (a lift back at
 // its start, a platform somewhere else on its path, a save in mid air) you're
 // held on the spot a while in case it's just late, then moved on before you
-// land anywhere: to ground you walked on before, newest first, and the
-// station last. Each of those gets the same
+// land anywhere: to ground you walked on before, newest first and off the
+// piece that failed, and the station last. Each of those gets the same
 // check. Right after a load the handle points at a stand-in for a few
 // seconds, so only reads by the target count
 void NextFallback(DWORD handle, ULONGLONG now, const char* why) {
     g_spawn.armed = false;
-    ++g_fallbackAt;
+    if (g_failedCount < static_cast<int>(std::size(g_failed))) g_failed[g_failedCount++] = g_landTarget;
+    int skipped = 0;
+    while (++g_fallbackAt < g_fallbackCount && OnFailedPiece(g_fallback[g_fallbackAt])) ++skipped;
+    if (skipped) Log("  skipped %d spots you walked that sit on the same stretch", skipped);
     g_settleFrom = now;
     g_settling = false;
     if (g_fallbackAt > g_fallbackCount) {
         Log("%s, and there's nowhere left to try, staying put", why);
         g_landCheckAt = 0;
+        g_lostLanding = true;
         return;
     }
     const bool station = g_fallbackAt == g_fallbackCount;
+    // vanilla's own answer for this save, but the story may have gone one way
+    // past it (Ch 9's jump up to the lift), so it's no state to save over a
+    // good file with until she's been at a station herself
+    if (station) g_lostLanding = true;
     g_landTarget = station ? g_stationPos : g_fallback[g_fallbackAt];
     // the station's stretch of level, not the spot's: its own groups back
     if (station && !g_rebuildAreas.empty()) {

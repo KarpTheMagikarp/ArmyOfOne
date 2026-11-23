@@ -875,3 +875,23 @@ def test_a_late_floor_gets_a_few_seconds_before_she_moves_on():
     check = tick.index("CheckWorld();")
     assert "g_settleFrom = now;" in tick[check:check + 200]
 
+
+def test_a_fallback_skips_the_piece_that_failed_and_a_lost_landing_holds_save():
+    """
+    the three newest trail spots were all on the apron that wasn't there, so
+    she went through each in turn and fell to the deck below, where Save was
+    offered on a softlocked state. A fallback now skips spots within 5 m of
+    any that failed, and ending up at the station or nowhere keeps Save off
+    till she's been at a station
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr float kSamePiece = 5.0f;" in source
+    fallback = source[source.index("void NextFallback("):]
+    fallback = fallback[:fallback.index("\n}\n")]
+    assert "g_failed[g_failedCount++] = g_landTarget;" in fallback
+    assert "OnFailedPiece(g_fallback[g_fallbackAt])" in fallback
+    assert fallback.count("g_lostLanding = true;") == 2
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (g_lostLanding)") < withheld.index("g_sanctioned.story < 0")
+    assert "g_lostLanding = false;" in source[source.index("void Sanctify("):]
