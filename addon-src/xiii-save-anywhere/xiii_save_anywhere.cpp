@@ -132,6 +132,11 @@ constexpr int kNotFloorLayers = ~((1 << 1) | (1 << 14));
 // whether that's her walking, a body set down elsewhere being caught up
 // to, or a script moving her
 constexpr DWORD kSetMatrixRva = 0x3C1970;
+// the field's player controller, the object the movement update runs on
+// (RVA 0x228070 reads it first thing). Its flag word at +0x154 picks the
+// path that moves her with no stick, which is the one under suspicion
+constexpr DWORD kFieldPlayerRva = 0x23FF554;
+constexpr size_t kFieldPlayerFlags = 0x154, kFieldPlayerSpan = 0x600;
 constexpr unsigned char kSetMatrixHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x89, 0x4D, 0xB4};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
@@ -752,6 +757,10 @@ std::atomic<bool> g_fieldAnimates{false};
 std::atomic<void*> g_watchActor{nullptr};
 std::atomic<ULONGLONG> g_watchUntil{0};
 std::atomic<int> g_watchLines{0};
+// the controller as it was when the trace started, to diff at its end
+unsigned char g_ctrlStart[kFieldPlayerSpan];
+size_t g_ctrlGot = 0;
+bool g_ctrlDiffed = true;
 // and the map set then: a swap box she walks over after that is hers too
 std::string g_realSet;
 // the journal as a save of ours was asked for, for its .where
@@ -2575,6 +2584,10 @@ void Tick() {
             if (g_landCheckAt) g_landCheckAt = now;
             g_heightTraceUntil = g_debug ? now + 4000 : 0;
             g_watchLines = 0;
+            g_ctrlGot = 0;
+            g_ctrlDiffed = !g_debug;
+            if (auto* ctrl = *reinterpret_cast<unsigned char**>(g_base + kFieldPlayerRva))
+                g_ctrlGot = Readable(ctrl, g_ctrlStart, sizeof g_ctrlStart);
         }
     }
     // the setMatrix watch runs alongside, on whoever the leader is right now
@@ -2588,12 +2601,35 @@ void Tick() {
         }
         g_watchUntil = g_heightTraceUntil;
     }
+    // and once it's over, every dword of the controller that changed through it
+    if (!g_ctrlDiffed && g_heightTraceUntil && now >= g_heightTraceUntil) {
+        g_ctrlDiffed = true;
+        static unsigned char end[kFieldPlayerSpan];
+        auto* ctrl = *reinterpret_cast<unsigned char**>(g_base + kFieldPlayerRva);
+        const size_t got = ctrl ? std::min(g_ctrlGot, Readable(ctrl, end, sizeof end)) : 0;
+        int lines = 0;
+        for (size_t at = 0; at + 4 <= got && lines < 80; at += 4) {
+            DWORD a, b;
+            std::memcpy(&a, g_ctrlStart + at, 4);
+            std::memcpy(&b, end + at, 4);
+            if (a == b) continue;
+            float fa, fb;
+            std::memcpy(&fa, &a, 4);
+            std::memcpy(&fb, &b, 4);
+            Log("    controller +%#05x: %08lx -> %08lx (%g -> %g)", static_cast<unsigned>(at), a, b, fa, fb);
+            ++lines;
+        }
+        Log("  controller through the trace: %d of %u dwords changed", lines, static_cast<unsigned>(got / 4));
+    }
     if (g_heightTraceUntil && now < g_heightTraceUntil && now - g_heightTraceAt >= 250 && state == kStateFieldIdle) {
         Vec4 at{};
         char input[48];
         InputNow(input, sizeof input);
+        DWORD flags = 0;
+        if (auto* ctrl = *reinterpret_cast<unsigned char**>(g_base + kFieldPlayerRva))
+            Readable(ctrl + kFieldPlayerFlags, reinterpret_cast<unsigned char*>(&flags), sizeof flags);
         if (Position(PlayerHandle(), at))
-            Log("  after the load: %.2f %.2f %.2f (%s)", at.v[0], at.v[1], at.v[2], input);
+            Log("  after the load: %.2f %.2f %.2f (%s, controller %08lx)", at.v[0], at.v[1], at.v[2], input, flags);
         g_heightTraceAt = now;
     }
     if (g_worldCheckWanted && state == kStateFieldIdle && g_roamMs > 1000 &&
@@ -2995,7 +3031,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.27, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.28, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3041,7 +3077,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.27";
+    d.version = "0.25.28";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

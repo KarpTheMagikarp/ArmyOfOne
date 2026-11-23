@@ -958,4 +958,8 @@ def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     hook = hook[:hook.index("\n}\n")]
     assert "self == g_watchActor.load()" in hook and "g_watchLines++ < 120" in hook
     assert hook.rstrip().endswith("return g_setMatrix(self, edx, m, warp, lock);")
-    assert 'Log("  after the load: %.2f %.2f %.2f (%s)"' in source
+    assert 'Log("  after the load: %.2f %.2f %.2f (%s, controller %08lx)"' in source
+    # and the field player controller's flags each line, then what in it
+    # changed across the trace
+    assert "constexpr DWORD kFieldPlayerRva = 0x23FF554;" in source
+    assert 'Log("  controller through the trace: %d of %u dwords changed"' in source
