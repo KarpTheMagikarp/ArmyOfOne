@@ -1748,6 +1748,15 @@ void SurveyLayers(const Vec4& at) {
             if (std::fabs(hit[k] - at.v[0]) < 0.5f && std::fabs(hit[k + 2] - at.v[2]) < 0.5f) y = hit[k + 1];
         n += bit < 0 ? std::snprintf(line + n, sizeof line - n, " all %.2f", y)
                      : std::snprintf(line + n, sizeof line - n, " %d %.2f", bit, y);
+        // past the point and the normal there's more, and somewhere in it
+        // should be whose shape it hit: what names the piece a layer found
+        if (bit >= 0 && bit != 1 && bit != 14) {
+            const auto* raw = reinterpret_cast<const DWORD*>(hit);
+            char words[160];
+            int w = 0;
+            for (int k = 0; k < 16; ++k) w += std::snprintf(words + w, sizeof words - w, " %08lx", raw[k]);
+            Log("    layer %d hit:%s", bit, words);
+        }
     }
     Log("%s", line);
 }
@@ -2904,7 +2913,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.23, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.24, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2944,7 +2953,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.23";
+    d.version = "0.25.24";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
