@@ -24,6 +24,7 @@ SITES = (
     ("actor lock", 0x09D1A0, 12),
     ("actor unlock", 0x09D220, 12),
     ("player handle", 0x2C0810, 5),
+    ("ground ray", 0x5B000, 12),
     ("zone pointer", 0x7EB3A4, 2),
     ("pause bar", 0x546630, 12),
     ("text set", 0x4FC870, 12),

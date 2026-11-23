@@ -115,6 +115,14 @@ constexpr DWORD kLockRva = 0x09D1A0, kUnlockRva = 0x09D220;  // thiscall(tag), t
 constexpr unsigned char kLockHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0x89, 0x4D, 0xEC, 0x83, 0x7D, 0x08};
 constexpr unsigned char kUnlockHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0x83, 0x78};
 constexpr DWORD kActorMatrix = 0x78, kActorTranslation = 0xA8;
+// the ray the player controller (0x626240) casts to set her on the floor
+// after a spawn, on collision layer 11: thiscall(world, from, to, hit, layers).
+// The Ch 9 lift's apron isn't on that layer. Walking onto it she's held by her
+// contacts, but a load drops her through to whatever the ray does find, and
+// no move after the spawn takes (Nov 23)
+constexpr DWORD kGroundRayRva = 0x5B000, kGroundWorldRva = 0x23FCEB4;
+constexpr unsigned char kGroundRayHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x89, 0x4D, 0xF4, 0x51, 0x89, 0x65};
+constexpr int kGroundLayers = 1 << 11;
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
 constexpr DWORD kZoneLoadRva = 0x7EB3A4;        // mov ecx, [zone] in Zone's trigger native
@@ -311,6 +319,7 @@ using ResolveActorFn = unsigned char*(__fastcall*)(void*, void*, int);
 using LockFn = void(__fastcall*)(void*, void*, void*);
 using UnlockFn = void(__fastcall*)(void*, void*);
 using PlayerHandleFn = DWORD*(__cdecl*)(DWORD*);
+using GroundRayFn = int(__fastcall*)(void*, void*, const float*, const float*, float*, int);
 using SaveWriteFn = int(__fastcall*)(unsigned char*, void*, int, int, const void*, int);
 using SaveReadFn = int(__fastcall*)(unsigned char*, void*, int, void*, int);
 using MarkerLookupFn = int(__fastcall*)(void*, void*, int, float*, float*, float*);
@@ -1868,6 +1877,28 @@ bool CanSave() {
     return g_findSavePointRow() != nullptr && PlayerHandle() != 0xFFFFFFFF;
 }
 
+// the floor a load would set her on: the engine's own ray from half a metre
+// above her feet to 2 m under them. Its hit block has a point and a normal and
+// which is which isn't pinned yet, so the one under her is the point
+bool GroundUnder(const Vec4& at, float& y) {
+    void* world = *reinterpret_cast<void**>(g_base + kGroundWorldRva);
+    if (!world) return false;
+    alignas(16) float from[4] = {at.v[0], at.v[1] + 0.5f, at.v[2], 1.0f};
+    alignas(16) float to[4] = {at.v[0], at.v[1] - 2.0f, at.v[2], 1.0f};
+    alignas(16) float hit[16]{};
+    const int got = reinterpret_cast<GroundRayFn>(g_base + kGroundRayRva)(world, nullptr, from, to, hit, kGroundLayers);
+    if (g_debug)
+        Log("  ground ray from %.2f: %s, %.2f %.2f %.2f / %.2f %.2f %.2f", at.v[1], (got & 0xFF) ? "hit" : "nothing",
+            hit[1], hit[2], hit[3], hit[5], hit[6], hit[7]);
+    if (!(got & 0xFF)) return false;
+    for (int k : {1, 5})
+        if (std::fabs(hit[k] - at.v[0]) < 0.5f && std::fabs(hit[k + 2] - at.v[2]) < 0.5f && std::isfinite(hit[k + 1])) {
+            y = hit[k + 1];
+            return true;
+        }
+    return false;
+}
+
 // whether Save goes on the bar, and why not when it doesn't
 const char* Withheld() {
     if (!CanSave()) return "this area's save point isn't loaded";
@@ -1911,6 +1942,13 @@ const char* Withheld() {
     float rise = 0;
     if (!Steady(rise)) return "you were going up or down (a lift, a fall or a jump)";
     if (Carried()) return "something was carrying you (a moving platform)";
+    // last, being a call into the engine: what a load would land her on has
+    // to be what she's standing on
+    Vec4 at{};
+    float ground = 0;
+    if (!Position(PlayerHandle(), at) || !GroundUnder(at, ground) || std::fabs(ground - at.v[1]) > 0.5f)
+        return "the floor here only holds her while she walks on it (a moving part, like a lift's apron), a load "
+               "would drop her through";
     return nullptr;
 }
 
@@ -2919,6 +2957,7 @@ bool Verify() {
         {kLockRva, kLockHead, sizeof kLockHead},
         {kUnlockRva, kUnlockHead, sizeof kUnlockHead},
         {kPlayerHandleRva, kPlayerHandleHead, sizeof kPlayerHandleHead},
+        {kGroundRayRva, kGroundRayHead, sizeof kGroundRayHead},
         {kZoneLoadRva, kMovEcxMem, sizeof kMovEcxMem},
         {kPauseModeRva, kPauseModeHead, sizeof kPauseModeHead},
         {kTextSetIdRva, kTextSetIdHead, sizeof kTextSetIdHead},
@@ -3027,7 +3066,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.17, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.18, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3067,7 +3106,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.17";
+    d.version = "0.25.18";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

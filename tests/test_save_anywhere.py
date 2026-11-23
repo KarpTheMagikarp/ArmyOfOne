@@ -906,3 +906,23 @@ def test_the_ground_watch_is_debug_only_and_never_reads_freed_memory():
     arm = source[source.index("void SetWatch("):]
     arm = arm[:arm.index("\n}\n")]
     assert arm.index("g_watchFlags = nullptr;") < arm.index("g_watchFlags = flags;")
+
+
+def test_save_asks_the_engines_own_ground_ray_what_a_load_would_land_on():
+    """
+    the Ch 9 lift's apron holds her while she walks on it and drops her through
+    on every load, even with the lift back before she spawns (0.25.17, Nov 23).
+    The player controller (0x626240) sets her down after a spawn with a ray on
+    collision layer 11 (0x45B000), and the apron isn't on it. So the last thing
+    Save asks is that same ray, from just above her feet: no hit, or a hit more
+    than half a metre off where she stands, and there's no Save there
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kGroundRayRva = 0x5B000, kGroundWorldRva = 0x23FCEB4;" in source
+    assert "constexpr int kGroundLayers = 1 << 11;" in source
+    assert "{kGroundRayRva, kGroundRayHead, sizeof kGroundRayHead}," in source
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    carried = withheld.index("if (Carried())")
+    ray = withheld.index("!GroundUnder(at, ground) || std::fabs(ground - at.v[1]) > 0.5f")
+    assert carried < ray
