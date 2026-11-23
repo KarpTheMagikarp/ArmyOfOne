@@ -1209,6 +1209,12 @@ constexpr float kNearFloorAcross = 10.0f, kNearFloorUp = 1.0f;
 // Save off all over Vile Peaks (Nov 16). The pause still checks it
 bool g_rode = false;
 Vec4 g_rodeAt{};
+// the latch's other way in: a scene that put her somewhere else. It may have
+// stood her on something it moved, a lift it brought down, and the game calls
+// a parked lift floor (Ch 9, Nov 22: a save on it, no lift on load)
+bool g_rodeByScene = false;
+Vec4 g_sceneFrom{};
+bool g_sceneFromRead = false;
 constexpr float kOffRide = 6.0f;
 // the vertical run that's building: same direction every sample, steeper than 45
 float g_runDy = 0;
@@ -1715,6 +1721,9 @@ const char* Withheld() {
         if (std::memcmp(now.zone, g_sanctioned.zone, sizeof now.zone) != 0)
             return "a zone flag changed since you were last at a station, and no save keeps those";
     }
+    if (g_rode)
+        return g_rodeByScene ? "a scene moved her and she hasn't walked off where it left her yet"
+                             : "she rode a lift and hasn't walked off it yet";
     // near the floor only counts with ground walked since the last scene or
     // station behind it: if the spot's floor is gone on load, that's where she
     // lands instead of a station that may sit on the far side of the scene
@@ -1725,7 +1734,6 @@ const char* Withheld() {
     float rise = 0;
     if (!Steady(rise)) return "you were going up or down (a lift, a fall or a jump)";
     if (Carried()) return "something was carrying you (a moving platform)";
-    if (g_rode) return "she rode a lift and hasn't walked off it yet";
     return nullptr;
 }
 
@@ -2292,6 +2300,7 @@ void Tick() {
                 if (!g_rode) Log("riding a lift (%.1f %s in %llu ms), Save waits till she's off it", std::fabs(g_runDy),
                                  g_runDy > 0 ? "up" : "down", g_runMs);
                 g_rode = true;
+                g_rodeByScene = false;
                 g_rodeAt = next.pos;
             }
             float rise = 0;
@@ -2311,7 +2320,9 @@ void Tick() {
             // floor you've walked since
             const bool offRide = !g_rode || std::hypot(next.pos.v[0] - g_rodeAt.v[0], next.pos.v[2] - g_rodeAt.v[2]) >= kOffRide;
             if (Steady(rise) && !carried && g_idleSolid && offRide) {
-                if (g_rode) Log("off the lift, at %.2f %.2f %.2f", next.pos.v[0], next.pos.v[1], next.pos.v[2]);
+                if (g_rode)
+                    Log("off %s, at %.2f %.2f %.2f", g_rodeByScene ? "where the scene left her" : "the lift", next.pos.v[0],
+                        next.pos.v[1], next.pos.v[2]);
                 g_rode = false;
                 if (g_sanctioned.story >= 0) Remember(next.pos);
             }
@@ -2326,6 +2337,7 @@ void Tick() {
         // against where it started, not the last station: a chest or a ledge
         // jump on the way flips flags, and those were fine before the scene
         ReadProgress(g_sceneStart);
+        g_sceneFromRead = Position(PlayerHandle(), g_sceneFrom);
         Log("scene (state %d)", state);
     }
     if (InScene(state)) g_wasScene = true;
@@ -2344,6 +2356,15 @@ void Tick() {
                 Log("that scene (state %d) left everything as it was, save anywhere is back", g_sceneSince);
                 g_sceneSince = -1;
             }
+        }
+        Vec4 at{};
+        if (g_sceneSince >= 0 && g_sceneFromRead && Position(PlayerHandle(), at) &&
+            (std::hypot(at.v[0] - g_sceneFrom.v[0], at.v[2] - g_sceneFrom.v[2]) > 2.0f ||
+             std::fabs(at.v[1] - g_sceneFrom.v[1]) > 1.0f)) {
+            Log("the scene moved her to %.2f %.2f %.2f, Save waits till she's walked off it", at.v[0], at.v[1], at.v[2]);
+            g_rode = true;
+            g_rodeByScene = true;
+            g_rodeAt = at;
         }
     }
     if (g_areaEntered.exchange(false) && state == kStateFieldIdle) {
