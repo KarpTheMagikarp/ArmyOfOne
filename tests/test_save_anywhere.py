@@ -898,3 +898,24 @@ def test_the_layers_under_her_are_surveyed_at_each_debug_pause_and_nothing_hooks
     dump = tick.index("DumpActor();")
     assert "SurveyLayers(at);" in tick[dump:dump + 200]
     assert tick.rfind("if (g_debug) {", 0, dump) > 0
+
+
+def test_save_stays_off_on_a_moving_piece_of_the_level():
+    """
+    every spot that dropped her on load read layer 16 at her feet and the
+    plain floor beside them read nothing, so Save asks the same ray for 16
+    through the half metre either side of her feet. It's the last check,
+    being a call into the engine, and no world means no answer rather than
+    a no
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr int kMovingLayer = 1 << 16;" in source
+    piece = source[source.index("bool OnMovingPiece(const Vec4& at) {"):]
+    piece = piece[:piece.index("\n}\n")]
+    assert "if (!world) return false;" in piece
+    assert "at.v[1] + 0.5f" in piece and "at.v[1] - 0.5f" in piece
+    assert "kMovingLayer) & 0xFF" in piece
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (Carried())") < withheld.index("OnMovingPiece(at)")
+    assert withheld.index("OnMovingPiece(at)") < withheld.rindex("return nullptr;")
