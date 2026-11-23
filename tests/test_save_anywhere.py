@@ -293,6 +293,10 @@ def test_a_load_of_ours_lands_through_the_spawn_alone_and_still_checks_for_a_fal
     """
     source = SOURCE.read_text(encoding="utf-8")
     assert "constexpr float kSpawnStep = 4.0f;" in source
+    # the spawn lifts her 1.45 off the marker, so ours answers that much under
+    # the floor she stood on, less 5 cm, the way a station's marker sits
+    assert "constexpr float kSpawnRise = 1.40f;" in source
+    assert "out.m[13] = saved.m[13] - kSpawnRise;" in source
     assert "g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0);" in source
     assert "SetPos" not in source and "0x2C3450" not in source
     body = source[source.index("void TickLoad(int state) {"):]

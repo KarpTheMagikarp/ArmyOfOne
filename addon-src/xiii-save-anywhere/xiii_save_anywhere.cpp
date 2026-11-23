@@ -288,6 +288,13 @@ constexpr DWORD kZoneNumber = 0x1D68;
 // third row (measured the same in every zone tried), so ours answers that
 // much ahead of the spot and the leader lands on it
 constexpr float kSpawnStep = 4.0f;
+// and this far above it: every load of ours came up exactly 1.45 over the
+// spot, and a station's own marker sits that far under the floor it spawns
+// you on (Ch 9's at 72.67, the deck at 74.12). Answering with the floor
+// itself dropped her 1.45 m onto whatever was solid in that first second,
+// which is how she went through the Ch 9 slab and off the Ch 10 rail. 5 cm
+// short of it so she's set down just over where she stood, not into it
+constexpr float kSpawnRise = 1.40f;
 constexpr unsigned char kTextCtorHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0xC7, 0x00};
 constexpr unsigned char kTextDtorHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0xC7, 0x00};
 
@@ -1422,6 +1429,7 @@ Matrix SpawnMatrix(const Matrix& saved, const float* station) {
     const float rows[12] = {fz, 0, -fx, 0, 0, 1, 0, 0, fx, 0, fz, 0};
     std::memcpy(out.m, rows, sizeof rows);
     out.m[12] = saved.m[12] + kSpawnStep * fx;
+    out.m[13] = saved.m[13] - kSpawnRise;
     out.m[14] = saved.m[14] + kSpawnStep * fz;
     return out;
 }
@@ -2913,7 +2921,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.24, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.25, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2953,7 +2961,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.24";
+    d.version = "0.25.25";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
