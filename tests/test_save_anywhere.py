@@ -933,3 +933,21 @@ def test_save_stays_off_on_a_moving_piece_of_the_level():
     remember = source[source.index("void Remember(const Vec4& at) {"):]
     remember = remember[:remember.index("\n}\n")]
     assert "if (OnMovingPiece(at)) return;" in remember
+
+
+def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
+    """
+    every load ends 1.6 to 1.8 m forward of where it set her down, a station's
+    own too, so with Debug on setMatrix gets watched for the leader through
+    the after-the-load trace, and those lines say if the stick or the movement
+    keys were held. It's on a function every actor calls every frame, so it's
+    never hooked without Debug and a failure to hook it doesn't stop the rest
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kSetMatrixRva = 0x3C1970;" in source
+    assert "if (g_debug && !HookAt(kSetMatrixRva, &SetMatrixHook, g_setMatrix)) {" in source
+    hook = source[source.index("int __fastcall SetMatrixHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "self == g_watchActor.load()" in hook and "g_watchLines++ < 120" in hook
+    assert hook.rstrip().endswith("return g_setMatrix(self, edx, m, warp, lock);")
+    assert 'Log("  after the load: %.2f %.2f %.2f (%s)"' in source

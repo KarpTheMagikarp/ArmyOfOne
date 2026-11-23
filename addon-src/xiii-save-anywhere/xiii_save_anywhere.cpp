@@ -126,6 +126,13 @@ constexpr unsigned char kGroundRayHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 
 // her feet besides her own body (14) and the flat plane under the field (1)
 // isn't floor a load can stand her on
 constexpr int kNotFloorLayers = ~((1 << 1) | (1 << 14));
+// actor->setMatrix, thiscall(matrix, warp, lock). Debug only: every load,
+// a station's included, ends 1.6 to 1.8 m forward of where it set her down
+// (Ch 7, Nov 23), and who writes her matrix through those seconds says
+// whether that's her walking, a body set down elsewhere being caught up
+// to, or a script moving her
+constexpr DWORD kSetMatrixRva = 0x3C1970;
+constexpr unsigned char kSetMatrixHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x89, 0x4D, 0xB4};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
 constexpr DWORD kZoneLoadRva = 0x7EB3A4;        // mov ecx, [zone] in Zone's trigger native
@@ -330,6 +337,7 @@ using LockFn = void(__fastcall*)(void*, void*, void*);
 using UnlockFn = void(__fastcall*)(void*, void*);
 using PlayerHandleFn = DWORD*(__cdecl*)(DWORD*);
 using GroundRayFn = int(__fastcall*)(void*, void*, const float*, const float*, float*, int);
+using SetMatrixFn = int(__fastcall*)(void*, void*, const float*, int, int);
 using SaveWriteFn = int(__fastcall*)(unsigned char*, void*, int, int, const void*, int);
 using SaveReadFn = int(__fastcall*)(unsigned char*, void*, int, void*, int);
 using MarkerLookupFn = int(__fastcall*)(void*, void*, int, float*, float*, float*);
@@ -355,6 +363,7 @@ ZoneFireFn g_zoneFire = nullptr;
 GetSavePointFn g_getSavePoint = nullptr;
 FindSavePointRowFn g_findSavePointRow = nullptr;
 ResolveActorFn g_resolveActor = nullptr;
+SetMatrixFn g_setMatrix = nullptr;
 LockFn g_lock = nullptr;
 UnlockFn g_unlock = nullptr;
 unsigned char** g_actorRegistry = nullptr;
@@ -734,6 +743,10 @@ ULONGLONG g_roamMs = 0, g_roamAt = 0;
 unsigned g_realFrom = ~0u;
 // Debug only: her height for the first few seconds she's real after a load
 ULONGLONG g_heightTraceUntil = 0, g_heightTraceAt = 0;
+// the leader the setMatrix watch is after, and till when
+std::atomic<void*> g_watchActor{nullptr};
+std::atomic<ULONGLONG> g_watchUntil{0};
+std::atomic<int> g_watchLines{0};
 // and the map set then: a swap box she walks over after that is hers too
 std::string g_realSet;
 // the journal as a save of ours was asked for, for its .where
@@ -2235,6 +2248,23 @@ const char* RawPress(bool& held) {
     return source;
 }
 
+// Debug only, on the after-the-load lines: whether anyone's touching the
+// stick or the movement keys while she drifts, so a drift isn't taken for
+// the game's when it was the player's
+void InputNow(char* out, size_t size) {
+    XInputState state{};
+    int lx = 0, ly = 0;
+    if (g_xinputGetState && g_xinputGetState(0, &state) == ERROR_SUCCESS) {
+        lx = state.thumbs[0];
+        ly = state.thumbs[1];
+    }
+    char keys[8]{};
+    int n = 0;
+    for (int key : {'W', 'A', 'S', 'D'})
+        if (GetAsyncKeyState(key) & 0x8000) keys[n++] = static_cast<char>(key);
+    std::snprintf(out, size, "stick %d %d, keys %s", lx, ly, n ? keys : "-");
+}
+
 // a line that says where and when, at the moments the journal is about: a
 // scene handing back to free roam, walking into a station, a save, a load.
 // With Debug on it lists what the field gained since the last one too, so a
@@ -2532,11 +2562,26 @@ void Tick() {
             // fight on the floor below. 2.5 s in she'd already dropped 11 m
             if (g_landCheckAt) g_landCheckAt = now;
             g_heightTraceUntil = g_debug ? now + 4000 : 0;
+            g_watchLines = 0;
         }
+    }
+    // the setMatrix watch runs alongside, on whoever the leader is right now
+    if (g_setMatrix && g_heightTraceUntil && now < g_heightTraceUntil) {
+        unsigned char* registry = *g_actorRegistry;
+        const DWORD handle = PlayerHandle();
+        if (registry && handle != 0xFFFFFFFF) {
+            g_lock(registry + 0x6C0, nullptr, nullptr);
+            g_watchActor = g_resolveActor(registry, nullptr, static_cast<int>(handle));
+            g_unlock(registry + 0x6C0, nullptr);
+        }
+        g_watchUntil = g_heightTraceUntil;
     }
     if (g_heightTraceUntil && now < g_heightTraceUntil && now - g_heightTraceAt >= 250 && state == kStateFieldIdle) {
         Vec4 at{};
-        if (Position(PlayerHandle(), at)) Log("  after the load: %.2f %.2f %.2f", at.v[0], at.v[1], at.v[2]);
+        char input[48];
+        InputNow(input, sizeof input);
+        if (Position(PlayerHandle(), at))
+            Log("  after the load: %.2f %.2f %.2f (%s)", at.v[0], at.v[1], at.v[2], input);
         g_heightTraceAt = now;
     }
     if (g_worldCheckWanted && state == kStateFieldIdle && g_roamMs > 1000 &&
@@ -2813,6 +2858,7 @@ bool Verify() {
         {kUnlockRva, kUnlockHead, sizeof kUnlockHead},
         {kPlayerHandleRva, kPlayerHandleHead, sizeof kPlayerHandleHead},
         {kGroundRayRva, kGroundRayHead, sizeof kGroundRayHead},
+        {kSetMatrixRva, kSetMatrixHead, sizeof kSetMatrixHead},
         {kZoneLoadRva, kMovEcxMem, sizeof kMovEcxMem},
         {kPauseModeRva, kPauseModeHead, sizeof kPauseModeHead},
         {kTextSetIdRva, kTextSetIdHead, sizeof kTextSetIdHead},
@@ -2895,6 +2941,22 @@ bool HookAt(DWORD rva, Fn detour, Fn& original) {
                 reinterpret_cast<LPVOID*>(&original));
 }
 
+int __fastcall SetMatrixHook(void* self, void* edx, const float* m, int warp, int lock) {
+    if (m && self == g_watchActor.load() && GetTickCount64() < g_watchUntil.load()) {
+        static DWORD lastFrom = 0;
+        static float last[3]{};
+        const DWORD from = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) - g_base);
+        const bool moved = std::fabs(m[12] - last[0]) + std::fabs(m[13] - last[1]) + std::fabs(m[14] - last[2]) > 0.05f;
+        // a new writer always, the same one each 5 cm it moves her
+        if ((from != lastFrom || moved) && g_watchLines++ < 120) {
+            lastFrom = from;
+            std::memcpy(last, m + 12, sizeof last);
+            Log("    set from %#lx: %.2f %.2f %.2f, warp %d", from, m[12], m[13], m[14], warp);
+        }
+    }
+    return g_setMatrix(self, edx, m, warp, lock);
+}
+
 bool HookWorld() {
     return HookAt(kAreaOnRva, &AreaOnHook, g_areaOn) && HookAt(kAreaFadeRva, &AreaFadeHook, g_areaFade) &&
            HookAt(kAreaOffRva, &AreaOffHook, g_areaOff) && HookAt(kObjectRva, &ObjectHook, g_object) &&
@@ -2921,7 +2983,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.25, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.26, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2950,6 +3012,12 @@ DWORD WINAPI Worker(LPVOID) {
         Log("couldn't hook the game, save anywhere is off this run");
         return 0;
     }
+    // Debug only and not worth stopping for: it's on a function every actor
+    // calls every frame
+    if (g_debug && !HookAt(kSetMatrixRva, &SetMatrixHook, g_setMatrix)) {
+        g_setMatrix = nullptr;
+        Log("couldn't watch who moves her after a load");
+    }
     Log("ready, save is button %d or the %c key%s", g_button, g_saveKey, g_xinputGetState ? "" : " (no XInput)");
     return 0;
 }
@@ -2961,7 +3029,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.25";
+    d.version = "0.25.26";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
