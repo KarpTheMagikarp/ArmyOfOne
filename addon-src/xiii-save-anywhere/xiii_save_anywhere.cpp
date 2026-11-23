@@ -1311,8 +1311,13 @@ constexpr int kTrailLength = 6;
 Vec4 g_trail[kTrailLength]{};
 int g_trailCount = 0;
 
+bool OnMovingPiece(const Vec4& at);
+
 void Remember(const Vec4& at) {
     if (g_trailCount && std::hypot(at.v[0] - g_trail[0].v[0], at.v[2] - g_trail[0].v[2]) < 4.0f) return;
+    // a load that lands on the trail lands the same way a save at the spot
+    // would, so it only keeps ground Save itself would have taken
+    if (OnMovingPiece(at)) return;
     for (int i = std::min(g_trailCount, kTrailLength - 1); i > 0; --i) g_trail[i] = g_trail[i - 1];
     g_trail[0] = at;
     g_trailCount = std::min(g_trailCount + 1, kTrailLength);
@@ -2899,7 +2904,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.22, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.23, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2939,7 +2944,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.22";
+    d.version = "0.25.23";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

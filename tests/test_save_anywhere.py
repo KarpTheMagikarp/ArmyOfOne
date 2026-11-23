@@ -925,3 +925,7 @@ def test_save_stays_off_on_a_moving_piece_of_the_level():
     withheld = withheld[:withheld.index("\n}\n")]
     assert withheld.index("if (Carried())") < withheld.index("OnMovingPiece(at)")
     assert withheld.index("OnMovingPiece(at)") < withheld.rindex("return nullptr;")
+    # and the trail a lost load falls back on only keeps what Save would take
+    remember = source[source.index("void Remember(const Vec4& at) {"):]
+    remember = remember[:remember.index("\n}\n")]
+    assert "if (OnMovingPiece(at)) return;" in remember
