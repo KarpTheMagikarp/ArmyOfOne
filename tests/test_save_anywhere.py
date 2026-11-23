@@ -287,15 +287,17 @@ def test_a_load_of_ours_lands_through_the_spawn_alone_and_still_checks_for_a_fal
     """
     the spawn sets the leader a step behind the start marker, so ours answers
     a step ahead of the spot, upright. A move after the spawn got pulled back
-    toward where the spawn had put you, so there isn't one any more
+    toward where the spawn had put you, so there isn't one any more. Nothing
+    else moves her either: her body wrote back every move tried after the
+    spawn (Ch 9, Nov 23)
     """
     source = SOURCE.read_text(encoding="utf-8")
     assert "constexpr float kSpawnStep = 4.0f;" in source
     assert "g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0);" in source
+    assert "SetPos" not in source and "0x2C3450" not in source
     body = source[source.index("void TickLoad(int state) {"):]
     body = body[:body.index("\n}\n")]
-    # the spot's never moved onto after the spawn: only a fallback moves you
-    assert "NextFallback(" in body
+    assert "LoseSpot(" in body
 
 
 def test_after_a_story_beat_it_saves_only_what_a_load_can_put_back():
@@ -338,16 +340,18 @@ def test_after_a_story_beat_it_saves_only_what_a_load_can_put_back():
 def test_a_floor_thats_gone_on_load_is_caught_whatever_moved_it():
     """
     lifts, sideways platforms, a save in mid air: if the floor isn't where it
-    was once the field's rebuilt she sinks with nothing under her, and that
-    moves her on. On the level's floor only a whole floor down counts, and
-    stairs cover more ground than height, so walking off down them isn't one
+    was once the field's rebuilt she drops straight through, and the spot's
+    marked so the next load starts somewhere she walked. Stairs and a hop off
+    a step cover more ground than height, so they aren't a drop (0.25.13 read
+    one as a fall)
     """
     source = SOURCE.read_text(encoding="utf-8")
     body = source[source.index("void TickLoad(int state) {"):]
     body = body[:body.index("\n}\n")]
-    assert "if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {" in body
-    assert "NextFallback(handle, now, why);" in body
-    assert "g_rescues < 3" in body
+    drop = body.index("if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {")
+    after = body[drop:drop + 500]
+    assert "LoseSpot(g_loadedSlot, g_landTarget);" in after and "g_lostLanding = true;" in after
+    assert body.index("if (g_worldCheckWanted) return;") < drop
 
 
 def test_a_station_is_what_makes_a_state_safe_to_save_in():
@@ -433,8 +437,9 @@ def test_platforms_any_way_they_move_and_where_a_missing_floor_sends_you():
     """
     up and down is the lift guard. Sideways or spinning is being carried
     where she isn't facing, step by step, with the facing axis learnt from her
-    own walking rather than assumed. And if the floor's gone on load, the
-    ground she walked on just before comes first, the station last
+    own walking rather than assumed. And if the floor was gone on load, the
+    next load of that save starts on the ground she walked on before, off
+    that stretch, and the station only when there's none
     """
     source = SOURCE.read_text(encoding="utf-8")
     withheld = source[source.index("const char* Withheld() {"):]
@@ -443,9 +448,12 @@ def test_platforms_any_way_they_move_and_where_a_missing_floor_sends_you():
     carried = source[source.index("bool Carried() {"):]
     carried = carried[:carried.index("\n}\n")]
     assert "FacingAxis()" in carried and "if (axis < 0) return false;" in carried
-    fallback = source[source.index("void NextFallback("):]
-    fallback = fallback[:fallback.index("\n}\n")]
-    assert "g_fallbackAt == g_fallbackCount" in fallback and "g_stationPos" in fallback
+    avoid = source[source.index("bool AvoidLostSpots(int slot, Matrix& saved) {"):]
+    avoid = avoid[:avoid.index("\n}\n")]
+    assert "for (int i = 0; i < g_fallbackCount; ++i) {" in avoid and "return false;" in avoid
+    arm = source[source.index("void TryArm(int marker) {"):]
+    arm = arm[:arm.index("\n}\n")]
+    assert "} else if (!AvoidLostSpots(load.slot, saved)) {" in arm
     assert 'fprintf(file, "\\ntrail %d", g_savedTrailCount);' in source
     # a station starts a fresh trail, and a new field throws the old one away
     assert "g_trailCount = 0;" in source[source.index("void Sanctify("):]
@@ -549,10 +557,10 @@ def test_what_the_scripts_did_to_the_field_goes_with_the_save():
                  "kEncountRva"):
         assert f"{{{site}, " in source
     assert "WriteWorld(file, g_savedWorld, g_savedZone, g_savedMapSet);" in source
-    check = source[source.index("size_t CheckWorld() {"):]
+    check = source[source.index("void CheckWorld() {"):]
     check = check[:check.index("\n}\n")]
     assert "Missing(g_pending, have, &other, boxes, g_realFrom)" in check and "Replay(e)" in check
-    replay = source[source.index("void Replay(const Entry& e) {"):]
+    replay = source[source.index("bool Replay(const Entry& e) {"):]
     replay = replay[:replay.index("\n}\n")]
     # back through the hooked entries, so the journal sees the replay too
     assert "g_base + kAreaOnRva" in replay and "g_areaOn(" not in replay
@@ -586,7 +594,7 @@ def test_a_load_waits_for_the_real_rebuild_before_putting_anything_back():
     wait = tick[tick.index("if (g_worldCheckWanted"):]
     wait = wait[:wait.index("CheckWorld()")]
     assert "!StandIn(at)" in wait and "g_lastNoteAt" in wait
-    check = source[source.index("size_t CheckWorld() {"):]
+    check = source[source.index("void CheckWorld() {"):]
     assert check.index("g_pendingZone != g_worldZone") < check.index("Replay(e)")
 
 
@@ -700,7 +708,7 @@ def test_a_save_of_ours_gets_its_field_back_even_when_its_spot_cant_be_used():
     arm = source[source.index("void TryArm(int marker) {"):]
     arm = arm[:arm.index("\n}\n")]
     assert arm.index("if (ours && load.hash == stored && format >= 6) {") < arm.index("if (!ours) {")
-    check = source[source.index("size_t CheckWorld() {"):]
+    check = source[source.index("void CheckWorld() {"):]
     check = check[:check.index("\n}\n")]
     assert "if (g_pendingZone != g_worldZone) {" in check and "MapSetName()" not in check
     # only the area boxes' groups go by the map set, the one she came up on
@@ -738,8 +746,7 @@ def test_the_area_boxes_groups_come_back_with_the_spot():
     a station before it, so with those calls left out the terminal ahead stood
     invisible, solid and dead (Vile Peaks, Nov 16). They go in the journal
     marked as a box's, and come back only at the spot, on the map set it was
-    saved on, and not over a box she's walked through since. If the load ends
-    up at the station after all, the station's own groups go back
+    saved on, and not over a box she's walked through since
     """
     source = SOURCE.read_text(encoding="utf-8")
     assert "constexpr DWORD kAreaBoxFrom = 0x1C88D0, kAreaBoxTo = 0x1C9AA5;" in source
@@ -753,12 +760,9 @@ def test_the_area_boxes_groups_come_back_with_the_spot():
     missing = missing[:missing.index("\n}\n")]
     assert "(FromBox(w) && !boxes)" in missing
     assert "FromBox(w) && it != have.end() && FromBox(*it) && it->seq > walked" in missing
-    check = source[source.index("size_t CheckWorld() {"):]
+    check = source[source.index("void CheckWorld() {"):]
     check = check[:check.index("\n}\n")]
     assert "g_spotUsed && g_realSet == g_pendingMapSet && read &&" in check and "< kBoxReach" in check
-    fallback = source[source.index("void NextFallback("):]
-    fallback = fallback[:fallback.index("\n}\n")]
-    assert "if (station && !g_rebuildAreas.empty()) {" in fallback
     # the stand-in's boxes aren't hers
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
@@ -804,29 +808,36 @@ def test_a_cutscene_a_callback_loaded_for_later_comes_back_with_the_save():
     missing = source[source.index("std::vector<Entry> Missing("):]
     missing = missing[:missing.index("\n}\n")]
     assert "if (w.op == Op::Cutscene && !w.i) continue;" in missing
-    replay = source[source.index("void Replay(const Entry& e) {"):]
+    replay = source[source.index("bool Replay(const Entry& e) {"):]
     replay = replay[:replay.index("\n}\n")]
     assert "case Op::Cutscene: {" in replay and "g_base + kCutsceneRva" in replay
     # a newer op in an older reader is a bad file, not a crash
     assert "op < 0 || op > static_cast<int>(Op::Cutscene) ||" in source
 
 
-def test_a_load_holds_her_on_the_spot_till_the_field_is_put_back():
+def test_the_floor_goes_back_before_she_spawns():
     """
-    Ch 9: a save on the lift the button cutscene brought down. On load the
-    lift wasn't back yet, she dropped 11 m into the fight below, and the
-    fallback moves couldn't take mid-fight. Till the replay has run a drop
-    puts her back on the spot, and the drop check starts the moment it's her,
-    not 2.5 s after the spawn
+    Ch 9: a save on the lift's apron, which the button cutscene brought down.
+    Her body starts falling the moment it spawns, and the replay a second into
+    free roam was too late: she was 4 m under the apron by then, and no move
+    after the spawn ever took (Nov 23). So the areas, boxes and bg anims go
+    back on the rebuild's first call, before the real her is in the field,
+    again next frame for anything turned down, and the fall check still waits
+    for the full replay
     """
     source = SOURCE.read_text(encoding="utf-8")
-    land = source[source.index("void TickLoad(int state) {"):]
-    land = land[:land.index("\n}\n")]
-    hold = land.index("if (g_worldCheckWanted && g_fallbackAt < 0 && flat < 3.0f && drop > 1.0f) {")
-    assert hold < land.index("NextFallback(handle, now, why);")
-    assert "g_setPosFlash(handle, g_landTarget.v, kWarp);" in land[hold:hold + 400]
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
+    assert ("if (g_pendingWanted && !g_earlyDone && g_pendingZone == g_worldZone && "
+            "g_fieldNotes.load() != g_armFieldNotes &&") in tick
+    early = source[source.index("void EarlyReplay() {"):]
+    early = early[:early.index("\n}\n")]
+    assert "Missing(g_pending, WorldNow(), nullptr, false)" in early and "Kind(e.op) <= 2" in early
+    assert "if (refused && ++g_earlyTries < 60) g_earlyDone = false;" in early
+    replay = source[source.index("bool Replay(const Entry& e) {"):]
+    replay = replay[:replay.index("\n}\n")]
+    # a refused one stays out of the journal, so it's still missing next frame
+    assert "if (took) Note(" in replay
     real = tick.index("g_realFrom = g_notes.load();")
     assert "if (g_landCheckAt) g_landCheckAt = now;" in tick[real:real + 400]
 
@@ -854,56 +865,28 @@ def test_a_scene_that_moves_her_holds_save_till_she_walks_off():
     assert withheld.index("if (g_rode)") < withheld.index("if (!g_idleSolid")
 
 
-def test_every_move_warps_her_body_and_the_replay_sets_her_down_again():
+def test_a_spot_that_dropped_her_is_skipped_on_the_next_load_and_save_waits():
     """
-    Ch 9, Nov 23: the hardware watch caught her physics body writing her back
-    after every move we made, because we called the engine's setPos with
-    warp off, which is Chara.setPos, not setPosFlash. The body had also been
-    falling since the spawn, through the apron the replay only put back later.
-    So every move warps, the replay sets her down on the spot again, and a
-    fall is straight down, not a hop next to the spot (0.25.13 sent a jump to
-    the station)
-    """
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr int kWarp = 1;" in source
-    assert "g_landTarget.v, 0)" not in source
-    land = source[source.index("void TickLoad(int state) {"):]
-    land = land[:land.index("\n}\n")]
-    wait = land.index("if (g_worldCheckWanted) return;")
-    sink = land.index("if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {")
-    assert wait < sink
-    window = land[sink:sink + 400]
-    assert "NextFallback(handle, now, why);" in window and "g_setPosFlash" not in window
-    tick = source[source.index("void Tick() {"):]
-    tick = tick[:tick.index("\n}\n")]
-    reseat = tick[tick.index("if (CheckWorld() && g_landCheckAt && g_fallbackAt < 0 &&"):]
-    assert "g_setPosFlash(PlayerHandle(), g_landTarget.v, kWarp);" in reseat[:400]
-    assert "g_reseatAt = now + 300;" in reseat[:500]
-    # and a second look a beat later, before any fall check, in case the
-    # floor the replay put back only collides from the next frames
-    again = land.index("if (g_reseatAt) {")
-    assert wait < again < sink
-
-
-def test_a_fallback_skips_the_piece_that_failed_and_a_lost_landing_holds_save():
-    """
-    the three newest trail spots were all on the apron that wasn't there, so
-    she went through each in turn and fell to the deck below, where Save was
-    offered on a softlocked state. A fallback now skips spots within 5 m of
-    any that failed, and ending up at the station or nowhere keeps Save off
-    till she's been at a station
+    nothing moves her body once it's spawned, so a spot that dropped her is
+    written beside its .where and the next load of that save starts on the
+    newest ground she walked that's 5 m or more off it: the Ch 9 apron's
+    three newest trail spots were all on the apron. Save stays off till she's
+    been at a station, since she fell somewhere a save would softlock, and a
+    new save over the slot drops the list
     """
     source = SOURCE.read_text(encoding="utf-8")
     assert "constexpr float kSamePiece = 5.0f;" in source
-    fallback = source[source.index("void NextFallback("):]
-    fallback = fallback[:fallback.index("\n}\n")]
-    assert "g_failed[g_failedCount++] = g_landTarget;" in fallback
-    assert "OnFailedPiece(g_fallback[g_fallbackAt])" in fallback
-    assert fallback.count("g_lostLanding = true;") == 2
+    assert 'std::string LostPath(int slot) { return WherePath(slot) + ".lost"; }' in source
+    write = source[source.index("void WriteWhere(const SlotHash& save) {"):]
+    assert "DeleteFileA(LostPath(save.slot).c_str());" in write[:200]
+    assert "if (DeleteFileA(WherePath(slot).c_str())) g_staleSlot = slot;\n        DeleteFileA(LostPath(slot).c_str());" in source
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
     assert withheld.index("if (g_lostLanding)") < withheld.index("g_sanctioned.story < 0")
     assert "g_lostLanding = false;" in source[source.index("void Sanctify("):]
+    arm = source[source.index("void TryArm(int marker) {"):]
+    arm = arm[:arm.index("\n}\n")]
+    assert "g_lostLanding = false;" in arm
 
 
 def test_the_ground_watch_is_debug_only_and_never_reads_freed_memory():

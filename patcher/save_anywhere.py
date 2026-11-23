@@ -23,7 +23,6 @@ SITES = (
     ("actor lookup", 0x2A18B0, 12),
     ("actor lock", 0x09D1A0, 12),
     ("actor unlock", 0x09D220, 12),
-    ("warp", 0x2C3450, 10),
     ("player handle", 0x2C0810, 5),
     ("zone pointer", 0x7EB3A4, 2),
     ("pause bar", 0x546630, 12),

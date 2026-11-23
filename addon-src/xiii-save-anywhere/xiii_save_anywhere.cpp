@@ -106,7 +106,8 @@ constexpr unsigned char kFindSavePointRowHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC,
 // script command 0xB8 to fill a script variable later. Under the actor
 // registry's lock (+0x6C0) the handle resolves to the actor, whose live world
 // matrix is at +0x78 (translation row at +0xA8). +0x150 is only a request
-// block setters like setPosFlash drop values into for 0x7bfca0 to apply
+// block setters like setPosFlash drop values into for 0x7bfca0 to apply, and
+// her physics body never follows it: nothing here moves her after the spawn
 constexpr DWORD kActorRegistryRva = 0x22E80DC;  // the registry pointer
 constexpr DWORD kResolveActorRva = 0x2A18B0;    // thiscall(registry, handle), the same one NovaFix uses
 constexpr unsigned char kResolveActorHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x89, 0x4D, 0xF0, 0x33, 0xC0, 0x83};
@@ -114,8 +115,6 @@ constexpr DWORD kLockRva = 0x09D1A0, kUnlockRva = 0x09D220;  // thiscall(tag), t
 constexpr unsigned char kLockHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0x89, 0x4D, 0xEC, 0x83, 0x7D, 0x08};
 constexpr unsigned char kUnlockHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0x83, 0x78};
 constexpr DWORD kActorMatrix = 0x78, kActorTranslation = 0xA8;
-constexpr DWORD kSetPosFlashRva = 0x2C3450;     // cdecl(handle, const float pos[4], warp)
-constexpr unsigned char kSetPosFlashHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0x0F, 0xBF, 0x45, 0x08};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
 constexpr DWORD kZoneLoadRva = 0x7EB3A4;        // mov ecx, [zone] in Zone's trigger native
@@ -311,15 +310,6 @@ using FindSavePointRowFn = void*(__cdecl*)();
 using ResolveActorFn = unsigned char*(__fastcall*)(void*, void*, int);
 using LockFn = void(__fastcall*)(void*, void*, void*);
 using UnlockFn = void(__fastcall*)(void*, void*);
-using SetPosFlashFn = void(__cdecl*)(DWORD, const float*, int);
-// what Chara.setPosFlash passes and Chara.setPos doesn't: bit 21 of the
-// actor's flags at +0x6C, carried a frame as bit 22 (0x7BFCA0). The character
-// controllers only rebuild her body from the matrix when 0x61F6C0 sees one of
-// those, so without it every move we made was undone by the body a frame
-// later. The watch caught it writing her back 12 m down after each one: the
-// station and fallback moves "didn't take" because they never happened
-// (Ch 9, Nov 23)
-constexpr int kWarp = 1;
 using PlayerHandleFn = DWORD*(__cdecl*)(DWORD*);
 using SaveWriteFn = int(__fastcall*)(unsigned char*, void*, int, int, const void*, int);
 using SaveReadFn = int(__fastcall*)(unsigned char*, void*, int, void*, int);
@@ -349,7 +339,6 @@ ResolveActorFn g_resolveActor = nullptr;
 LockFn g_lock = nullptr;
 UnlockFn g_unlock = nullptr;
 unsigned char** g_actorRegistry = nullptr;
-SetPosFlashFn g_setPosFlash = nullptr;
 PlayerHandleFn g_playerHandle = nullptr;
 PauseModeFn g_pauseMode = nullptr;
 TextSetIdFn g_textSetId = nullptr;
@@ -431,23 +420,21 @@ struct Spawn {
     int answered = 0;
 };
 Spawn g_spawn;
-ULONGLONG g_landCheckAt = 0, g_landGiveUp = 0, g_landSeenAt = 0, g_rescueAt = 0;
-bool g_held = false;
+ULONGLONG g_landCheckAt = 0, g_landGiveUp = 0, g_landSeenAt = 0;
 Vec4 g_landTarget{}, g_stationPos{};
-int g_rescues = 0;
-// where to go if the floor's gone: the save's trail, newest first, then the
-// station. -1 is the spot itself
+// the save's trail, newest first: where a later load of it starts if the spot
+// itself dropped her
 Vec4 g_fallback[6]{};
-int g_fallbackCount = 0, g_fallbackAt = -1;
-// spots whose floor never came, so the next try isn't on the same piece
-Vec4 g_failed[8]{};
-int g_failedCount = 0;
-// a second look a beat after setting her down on the spot post-replay, in
-// case what the replay put back only gets its collision on the next frames
-ULONGLONG g_reseatAt = 0;
-// the load ended up at the station or nowhere: whatever state that is, it
-// isn't one to write over a good save with
+int g_fallbackCount = 0;
+// the spot dropped her: whatever state she's in now, it isn't one to write
+// over a good save with
 bool g_lostLanding = false;
+// the field ops that go back before she's even in the field, once per load.
+// Its objects may not all be loaded on the rebuild's first call, so what got
+// turned down goes again next frame, for a second or so
+bool g_earlyDone = false;
+int g_earlyTries = 0;
+unsigned g_armFieldNotes = 0;
 
 void* Zone() { return *g_zoneSlot; }
 
@@ -719,12 +706,9 @@ bool g_pendingWanted = false;
 // the load starts at the save's spot, and where that is
 bool g_spotUsed = false;
 Vec4 g_savedSpot{};
-// how far from the spot the area boxes' groups still hold: a fallback to the
-// trail stays this close, the station rarely does
+// how far from the spot the area boxes' groups still hold: a load moved onto
+// the trail stays this close, the station rarely does
 constexpr float kBoxReach = 40.0f;
-// what the rebuild had for each area an area box's replay changed, in case
-// the load ends up at the station after all
-std::vector<Entry> g_rebuildAreas;
 // with Debug on, a station save keeps its journal too, in debug\, so loading
 // it can say how much of that world the game's own rebuild brought back
 int g_loadedSlot = -1;
@@ -749,6 +733,8 @@ int g_worldLines = 0;
 std::atomic<ULONGLONG> g_lastNoteAt{0};
 // every call the journal kept, ever, so a scene can tell whether it touched the field
 std::atomic<unsigned> g_notes{0};
+// areas, boxes and bg anims only: the rebuild's first of these means the scene's up
+std::atomic<unsigned> g_fieldNotes{0};
 unsigned g_notesAtScene = 0;
 // the calls a load can't put back yet (a chara made or let go, who you can
 // talk to, a path edge), counted the same way, and where the count stood at
@@ -823,6 +809,7 @@ void Note(Op op, const char* a, const char* b, int i, int j) {
     e.i = i;
     e.j = j;
     e.seq = ++g_notes;
+    if (Kind(op) <= 2) ++g_fieldNotes;
     const int zone = ZoneNumber();
     if (zone != g_worldZone) ForgetWorld("a new zone");
     EnterCriticalSection(&g_worldLock);
@@ -1105,14 +1092,17 @@ std::vector<Entry> WorldNow() {
 // door that was opening is open. Looping ones loop, the rest replay as made
 int ReplayMode(int mode) { return mode == 1 ? 5 : mode; }
 
-void Replay(const Entry& e) {
+// false when the game turned it down (a bg anim whose object isn't loaded
+// yet), which then stays out of the journal too
+bool Replay(const Entry& e) {
     void* scene = *reinterpret_cast<void**>(g_base + kSceneRva);
-    if (!scene && e.op != Op::Encount) return;
+    if (!scene && e.op != Op::Encount) return false;
     // the hooks only keep what a script asked for, so these go in by hand
     char a[16], b[16];
     std::memcpy(a, e.a, 16);
     std::memcpy(b, e.b, 16);
     g_replaying = true;
+    bool took = true;
     switch (e.op) {
     case Op::AreaOn:
         reinterpret_cast<AreaFn>(g_base + kAreaOnRva)(scene, nullptr, a, e.i);
@@ -1127,9 +1117,9 @@ void Replay(const Entry& e) {
         reinterpret_cast<AreaFn>(g_base + kObjectRva)(scene, nullptr, a, e.i);
         break;
     case Op::BgAnim: {
-        const int took = reinterpret_cast<BgAnimFn>(g_base + kBgAnimRva)(scene, nullptr, a, e.i, b, ReplayMode(e.j));
+        took = reinterpret_cast<BgAnimFn>(g_base + kBgAnimRva)(scene, nullptr, a, e.i, b, ReplayMode(e.j)) & 0xFF;
         if (g_debug) Log("  bg anim %s %s back at mode %d: %s", Name(a).c_str(), Name(b).c_str(), ReplayMode(e.j),
-                         (took & 0xFF) ? "took" : "refused");
+                         took ? "took" : "refused");
         break;
     }
     case Op::Layout:
@@ -1144,17 +1134,18 @@ void Replay(const Entry& e) {
         void* loader = holder ? *reinterpret_cast<void**>(holder + 8) : nullptr;
         if (!loader) {
             g_replaying = false;
-            return;
+            return false;
         }
         reinterpret_cast<CutsceneFn>(g_base + kCutsceneRva)(loader, nullptr, a, b[0] ? b : nullptr, e.j, e.i);
         break;
     }
     default:
         g_replaying = false;
-        return;
+        return false;
     }
     g_replaying = false;
-    Note(e.op, e.a[0] ? a : nullptr, e.b[0] ? b : nullptr, e.i, e.op == Op::BgAnim ? ReplayMode(e.j) : e.j);
+    if (took) Note(e.op, e.a[0] ? a : nullptr, e.b[0] ? b : nullptr, e.i, e.op == Op::BgAnim ? ReplayMode(e.j) : e.j);
+    return took;
 }
 
 // what the rebuild left different from the journal, so what a replay would
@@ -1616,6 +1607,12 @@ std::string WherePath(int slot) {
     return Folder("save-locations") + name;
 }
 
+// a spot a load dropped her through, kept beside its .where. Nothing can move
+// her body once it's spawned (every move we tried was written back by it a
+// frame later, Ch 9, Nov 23), so the only rescue is the next load: it starts
+// on ground she walked, off that stretch, instead of the spot again
+std::string LostPath(int slot) { return WherePath(slot) + ".lost"; }
+
 // where spots used to live, right beside the add-on, and the debug dumps
 // with them: moved into their folders once, never over a newer one
 void Tidy() {
@@ -1689,6 +1686,7 @@ bool ReadWorld(FILE* file, std::vector<Entry>& out, int* zone = nullptr, std::st
 
 void WriteWhere(const SlotHash& save) {
     ExplainLocations();
+    DeleteFileA(LostPath(save.slot).c_str());
     FILE* file = nullptr;
     if (fopen_s(&file, WherePath(save.slot).c_str(), "w") != 0 || !file) {
         Log("couldn't write %s", WherePath(save.slot).c_str());
@@ -1802,6 +1800,7 @@ int __fastcall SaveWriteHook(unsigned char* self, void* edx, int a, int b, const
         // a station save over a slot leaves that slot's spot matching nothing,
         // so it goes rather than piling up
         if (DeleteFileA(WherePath(slot).c_str())) g_staleSlot = slot;
+        DeleteFileA(LostPath(slot).c_str());
         if (g_debug) {
             FILE* file = nullptr;
             if (fopen_s(&file, StationWorldPath(slot).c_str(), "w") == 0 && file) {
@@ -1873,7 +1872,9 @@ bool CanSave() {
 const char* Withheld() {
     if (!CanSave()) return "this area's save point isn't loaded";
     if (g_worldCheckWanted) return "the field's still being put back after the load";
-    if (g_lostLanding) return "the load couldn't put her back where it was saved, Save waits till she's at a station";
+    if (g_lostLanding)
+        return "the load dropped her through the spot's floor, so Save waits till she's at a station (load that save "
+               "again and it starts on ground she walked)";
     if (g_sanctioned.story < 0) return "you haven't been at a station since this field started";
     static Progress now;
     ReadProgress(now);
@@ -2012,6 +2013,49 @@ int StartMarker() {
     return holder ? g_startMarker(holder, nullptr) : -1;
 }
 
+// a missing floor is a whole piece missing (a lift's apron, a bridge, a
+// platform), so ground within this of a spot that failed is on it too. Ch 9:
+// the three newest trail spots were all on the apron by the button
+constexpr float kSamePiece = 5.0f;
+
+std::vector<Vec4> ReadLost(int slot) {
+    std::vector<Vec4> lost;
+    FILE* file = nullptr;
+    if (fopen_s(&file, LostPath(slot).c_str(), "r") != 0 || !file) return lost;
+    Vec4 v{};
+    while (lost.size() < 8 && fscanf_s(file, "%f %f %f", &v.v[0], &v.v[1], &v.v[2]) == 3) lost.push_back(v);
+    fclose(file);
+    return lost;
+}
+
+void LoseSpot(int slot, const Vec4& spot) {
+    FILE* file = nullptr;
+    if (fopen_s(&file, LostPath(slot).c_str(), "a") != 0 || !file) return;
+    fprintf(file, "%.6f %.6f %.6f\n", spot.v[0], spot.v[1], spot.v[2]);
+    fclose(file);
+}
+
+bool OnLostPiece(const std::vector<Vec4>& lost, const Vec4& at) {
+    for (const Vec4& l : lost)
+        if (std::hypot(at.v[0] - l.v[0], at.v[2] - l.v[2]) < kSamePiece) return true;
+    return false;
+}
+
+// moves the spawn off a spot that dropped her before, onto the newest trail
+// spot off that stretch, keeping her heading. False when there's none
+bool AvoidLostSpots(int slot, Matrix& saved) {
+    const std::vector<Vec4> lost = ReadLost(slot);
+    if (!OnLostPiece(lost, Translation(saved.m))) return true;
+    for (int i = 0; i < g_fallbackCount; ++i) {
+        if (OnLostPiece(lost, g_fallback[i])) continue;
+        Log("slot %d's spot dropped her before, starting where she walked at %.2f %.2f %.2f instead", slot,
+            g_fallback[i].v[0], g_fallback[i].v[1], g_fallback[i].v[2]);
+        for (int k = 0; k < 3; ++k) saved.m[12 + k] = g_fallback[i].v[k];
+        return true;
+    }
+    return false;
+}
+
 // the first lookup of the field's start marker after a save of ours was read
 // decides it: the save's .where has to match (bytes, save point, a real spot)
 // or nothing's armed and every answer stays the game's. Anything off and you
@@ -2031,7 +2075,9 @@ void TryArm(int marker) {
     g_realFrom = ~0u;
     g_spotUsed = false;
     g_lostLanding = false;
-    g_rebuildAreas.clear();
+    g_earlyDone = false;
+    g_earlyTries = 0;
+    g_armFieldNotes = g_fieldNotes.load();
     g_pendingWanted = false;
     g_pendingMapSet = "-";
     g_pendingZone = -1;
@@ -2058,6 +2104,9 @@ void TryArm(int marker) {
         Log("slot %d spawns at a different save point than it was saved at, starting at the station", load.slot);
     } else if (saved.m[12] == 0.0f && saved.m[13] == 0.0f && saved.m[14] == 0.0f) {
         Log("slot %d's spot reads as the origin, starting at the station", load.slot);
+    } else if (!AvoidLostSpots(load.slot, saved)) {
+        Log("slot %d's spot dropped her before and nothing she walked is off that stretch, starting at the station",
+            load.slot);
     } else {
         // turned into the spawn's matrix on the first answer, against the station's
         g_spawn = {true, marker, GetTickCount64() + 20000, saved, load.slot, 0};
@@ -2066,12 +2115,7 @@ void TryArm(int marker) {
         g_spotUsed = true;
         g_landCheckAt = GetTickCount64() + 2500;
         g_landGiveUp = GetTickCount64() + 15000;
-        g_landSeenAt = g_rescueAt = 0;
-        g_rescues = 0;
-        g_fallbackAt = -1;
-        g_held = false;
-        g_reseatAt = 0;
-        g_failedCount = 0;
+        g_landSeenAt = 0;
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
         Log("slot %d: start marker %d answers with %.2f %.2f %.2f, %u things to check the field for once it's up",
@@ -2154,58 +2198,13 @@ void Sanctify(const char* where, bool baseline = true) {
     if (news) Log("story %d at %s", now.story, where);
 }
 
-// a missing floor is a whole piece missing (a lift's apron, a bridge, a
-// platform), so a spot within this of one that already failed is on it too.
-// Ch 9, Nov 22: the three newest trail spots were all on the apron by the
-// button and she went through each in turn
-constexpr float kSamePiece = 5.0f;
-
-bool OnFailedPiece(const Vec4& at) {
-    for (int i = 0; i < g_failedCount; ++i)
-        if (std::hypot(at.v[0] - g_failed[i].v[0], at.v[2] - g_failed[i].v[2]) < kSamePiece) return true;
-    return false;
-}
-
-// every frame from her first real frame after the spawn. This is the check
-// that doesn't care what kind of platform it was: if the floor you saved on is
-// there in the rebuilt field you stand on it, and if it isn't (a lift back at
-// its start, a platform somewhere else on its path, a save in mid air) you're
-// moved on before you land anywhere: to ground you walked on before, newest
-// first and off the piece that failed, and the station last. Each of those gets the same
-// check. Right after a load the handle points at a stand-in for a few
-// seconds, so only reads by the target count
-void NextFallback(DWORD handle, ULONGLONG now, const char* why) {
-    g_spawn.armed = false;
-    if (g_failedCount < static_cast<int>(std::size(g_failed))) g_failed[g_failedCount++] = g_landTarget;
-    int skipped = 0;
-    while (++g_fallbackAt < g_fallbackCount && OnFailedPiece(g_fallback[g_fallbackAt])) ++skipped;
-    if (skipped) Log("  skipped %d spots you walked that sit on the same stretch", skipped);
-    if (g_fallbackAt > g_fallbackCount) {
-        Log("%s, and there's nowhere left to try, staying put", why);
-        g_landCheckAt = 0;
-        g_lostLanding = true;
-        return;
-    }
-    const bool station = g_fallbackAt == g_fallbackCount;
-    // vanilla's own answer for this save, but the story may have gone one way
-    // past it (Ch 9's jump up to the lift), so it's no state to save over a
-    // good file with until she's been at a station herself
-    if (station) g_lostLanding = true;
-    g_landTarget = station ? g_stationPos : g_fallback[g_fallbackAt];
-    // the station's stretch of level, not the spot's: its own groups back
-    if (station && !g_rebuildAreas.empty()) {
-        Log("putting back the %u area groups the rebuild had at the station", static_cast<unsigned>(g_rebuildAreas.size()));
-        for (const Entry& e : g_rebuildAreas) Replay(e);
-        g_rebuildAreas.clear();
-    }
-    Log("%s, trying %s at %.2f %.2f %.2f", why, station ? "the station" : "where you walked before",
-        g_landTarget.v[0], g_landTarget.v[1], g_landTarget.v[2]);
-    g_setPosFlash(handle, g_landTarget.v, kWarp);
-    g_rescueAt = now;
-    g_rescues = 1;
-    g_landSeenAt = 0;
-}
-
+// every frame from her first real frame after the spawn, once the field's put
+// back. If the floor she saved on is there she stands on it; if it isn't (a
+// lift back at its start, a platform elsewhere on its path, a save in mid
+// air) she drops straight through, and nothing can catch her: the spot's
+// marked so the next load starts somewhere she walked, and Save stays off.
+// Right after a load the handle points at a stand-in for a few seconds, so
+// only reads by the target count
 void TickLoad(int state) {
     if (!g_landCheckAt || state != kStateFieldIdle || GetTickCount64() < g_landCheckAt) return;
     const ULONGLONG now = GetTickCount64();
@@ -2216,56 +2215,24 @@ void TickLoad(int state) {
     const bool standIn = std::fabs(at.v[0]) < 0.01f && std::fabs(at.v[1] - 1.5f) < 0.01f && std::fabs(at.v[2] + 10.0f) < 0.01f;
     const float flat = read && !standIn ? std::hypot(at.v[0] - g_landTarget.v[0], at.v[2] - g_landTarget.v[2]) : 1e9f;
     const float drop = g_landTarget.v[1] - at.v[1];
-    // the replay hasn't run yet, so a floor it puts back (a lift parked where
-    // a scene left it) isn't there either: keep her on the spot till it has,
-    // rather than let her drop through to whatever's below (Ch 9, Nov 22)
-    if (g_worldCheckWanted && g_fallbackAt < 0 && flat < 3.0f && drop > 1.0f) {
-        if (now - g_rescueAt >= 150) {
-            if (!g_held) Log("held her on the spot till the field's put back (she was at %.2f)", at.v[1]);
-            g_held = true;
-            g_setPosFlash(handle, g_landTarget.v, kWarp);
-            g_rescueAt = now;
-        }
-        return;
-    }
     if (g_worldCheckWanted) return;
-    if (g_reseatAt) {
-        if (now < g_reseatAt) return;
-        g_reseatAt = 0;
-        if (flat < 3.0f && drop > 0.5f) {
-            Log("still under the spot a beat after the replay (at %.2f), setting her down again", at.v[1]);
-            g_setPosFlash(handle, g_landTarget.v, kWarp);
-            g_landSeenAt = 0;
-            return;
-        }
-    }
-    // straight down, and she moves on that frame. A walk or a hop off a step
-    // covers more ground than height: 0.25.13 read a jump next to the spot as a
-    // fall and sent her to the station (Nov 23)
+    // straight down: a walk or a hop off a step covers more ground than
+    // height, and 0.25.13 read a jump next to the spot as a fall (Nov 23)
     if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {
-        char why[96];
-        std::snprintf(why, sizeof why, "dropped to %.2f %.2f %.2f, the floor isn't there", at.v[0], at.v[1], at.v[2]);
-        NextFallback(handle, now, why);
+        Log("dropped to %.2f %.2f %.2f, the floor at the spot isn't there", at.v[0], at.v[1], at.v[2]);
+        LoseSpot(g_loadedSlot, g_landTarget);
+        Log("slot %d's next load starts on ground she walked, off that stretch", g_loadedSlot);
+        g_lostLanding = true;
+        g_landCheckAt = 0;
+        g_spawn.armed = false;
         return;
     }
     if (flat < 3.0f) {
         if (!g_landSeenAt) g_landSeenAt = now;
         // stood there a few seconds without dropping: the floor's real
-        if (now - g_landSeenAt < (g_fallbackAt < 0 ? 4000u : 2000u)) return;
+        if (now - g_landSeenAt < 4000) return;
         Log("landed at %.2f %.2f %.2f, %.2f across and %.2f up from where it aimed", at.v[0], at.v[1], at.v[2], flat,
             at.v[1] - g_landTarget.v[1]);
-    } else if (g_rescueAt) {
-        // a move that didn't take gets another go, the way the move onto the
-        // spot got pulled back, then the next place along
-        if (now - g_rescueAt < 1000) return;
-        if (g_rescues < 3) {
-            g_setPosFlash(handle, g_landTarget.v, kWarp);
-            g_rescueAt = now;
-            ++g_rescues;
-            return;
-        }
-        NextFallback(handle, now, "the move didn't take");
-        return;
     } else if (read && Distance(at, g_stationPos) < 5.0f) {
         Log("started at the station (%.2f %.2f %.2f) after all", at.v[0], at.v[1], at.v[2]);
     } else if (now < g_landGiveUp) {
@@ -2385,8 +2352,20 @@ void Moment(const char* what) {
 // once a load's rebuild is done: a save of ours gets back whatever the
 // station's load script didn't do, and with Debug on a station save's load
 // says what the game's own rebuild missed, which is what this is all for
-// how many things it put back, so a load knows its floor may have just changed
-size_t CheckWorld() {
+// the floor-making part of the journal, before she's in the field. Box
+// triggered areas wait for the full replay, which knows where she came up,
+// and so does anything the rebuild changes after this
+void EarlyReplay() {
+    const std::vector<Entry> missing = Missing(g_pending, WorldNow(), nullptr, false);
+    int put = 0, refused = 0;
+    for (const Entry& e : missing)
+        if (Kind(e.op) <= 2) (Replay(e) ? put : refused)++;
+    if (put || !refused) Log("put %d areas, boxes and bg anims back before she's in the field", put);
+    if (refused && ++g_earlyTries < 60) g_earlyDone = false;
+    else if (refused) Log("  %d of them never took before she was in the field, the full replay tries again", refused);
+}
+
+void CheckWorld() {
     Moment("loaded, the station's rebuild is done");
     const std::vector<Entry> have = WorldNow();
     int other = 0;
@@ -2400,7 +2379,7 @@ size_t CheckWorld() {
             Log("saved in zone %d but this is zone %d, leaving the field as the game built it", g_pendingZone,
                 g_worldZone);
             g_pending.clear();
-            return 0;
+            return;
         }
         // the area boxes' groups are the stretch of level around the spot, so
         // only there, on the map set it was saved on. Started at the station
@@ -2414,26 +2393,19 @@ size_t CheckWorld() {
                 g_pendingMapSet.c_str(), g_realSet.c_str());
         const std::vector<Entry> missing = Missing(g_pending, have, &other, boxes, g_realFrom);
         LogMissing("putting the field back the way it was saved", missing, other);
-        g_rebuildAreas.clear();
-        for (const Entry& e : missing) {
-            if (!FromBox(e)) continue;
-            auto it = std::find_if(have.begin(), have.end(), [&](const Entry& h) { return SameTarget(h, e); });
-            if (it != have.end()) g_rebuildAreas.push_back(*it);
-        }
         for (const Entry& e : missing) Replay(e);
         g_pending.clear();
-        return missing.size();
+        return;
     }
-    if (!g_debug || g_loadedSlot < 0) return 0;
+    if (!g_debug || g_loadedSlot < 0) return;
     FILE* file = nullptr;
-    if (fopen_s(&file, StationWorldPath(g_loadedSlot).c_str(), "r") != 0 || !file) return 0;
+    if (fopen_s(&file, StationWorldPath(g_loadedSlot).c_str(), "r") != 0 || !file) return;
     std::vector<Entry> want;
     int zone = -1;
     const bool ok = ReadWorld(file, want, &zone);
     fclose(file);
     if (ok && zone == g_worldZone)
         LogMissing("a station load, against what was live when it saved", Missing(want, have, &other), other);
-    return 0;
 }
 
 unsigned char* g_pauseWidget = nullptr;
@@ -2473,6 +2445,16 @@ void Tick() {
         g_restartPoint = false;
     }
     TickWatch(state);
+    // her body starts falling the moment it spawns, so a floor the journal
+    // puts back has to be there before that, not a second into free roam: the
+    // Ch 9 apron wasn't, and she was 4 m under it by the time it came back
+    // (Nov 23). The rebuild's first area, box or bg anim call means the scene
+    // is up, and the real her spawns after its calls
+    if (g_pendingWanted && !g_earlyDone && g_pendingZone == g_worldZone && g_fieldNotes.load() != g_armFieldNotes &&
+        *reinterpret_cast<void**>(g_base + kSceneRva)) {
+        g_earlyDone = true;
+        EarlyReplay();
+    }
     const Sample& prev = g_track[(g_trackNext + 15) % 16];
     if (state == kStateFieldIdle && now - prev.at >= 40) {
         Matrix m{};
@@ -2671,16 +2653,7 @@ void Tick() {
         Vec4 at{};
         if (Position(PlayerHandle(), at) && !StandIn(at)) {
             g_worldCheckWanted = false;
-            // her body has been falling since the spawn, through whatever the
-            // replay only just put back (the Ch 9 apron: the matrix sat at the
-            // spawn while the body was already 4 m under it, Nov 23). So once
-            // it's back she's set down on the spot again, body and all
-            if (CheckWorld() && g_landCheckAt && g_fallbackAt < 0 &&
-                std::hypot(at.v[0] - g_landTarget.v[0], at.v[2] - g_landTarget.v[2]) < 3.0f) {
-                Log("set her back down on the spot now the field's put back");
-                g_setPosFlash(PlayerHandle(), g_landTarget.v, kWarp);
-                g_reseatAt = now + 300;
-            }
+            CheckWorld();
         }
     }
     if (state == kStateFieldPause && g_lastState != kStateFieldPause && g_phase == Phase::Idle && g_enabled) {
@@ -2945,7 +2918,6 @@ bool Verify() {
         {kResolveActorRva, kResolveActorHead, sizeof kResolveActorHead},
         {kLockRva, kLockHead, sizeof kLockHead},
         {kUnlockRva, kUnlockHead, sizeof kUnlockHead},
-        {kSetPosFlashRva, kSetPosFlashHead, sizeof kSetPosFlashHead},
         {kPlayerHandleRva, kPlayerHandleHead, sizeof kPlayerHandleHead},
         {kZoneLoadRva, kMovEcxMem, sizeof kMovEcxMem},
         {kPauseModeRva, kPauseModeHead, sizeof kPauseModeHead},
@@ -3007,7 +2979,6 @@ bool Verify() {
     g_lock = reinterpret_cast<LockFn>(g_base + kLockRva);
     g_unlock = reinterpret_cast<UnlockFn>(g_base + kUnlockRva);
     g_actorRegistry = reinterpret_cast<unsigned char**>(g_base + kActorRegistryRva);
-    g_setPosFlash = reinterpret_cast<SetPosFlashFn>(g_base + kSetPosFlashRva);
     g_playerHandle = reinterpret_cast<PlayerHandleFn>(g_base + kPlayerHandleRva);
     g_startMarker = reinterpret_cast<StartMarkerFn>(g_base + kStartMarkerRva);
     g_fieldStart = reinterpret_cast<void**>(g_base + kFieldStartRva);
@@ -3056,7 +3027,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.16, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.17, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3096,7 +3067,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.16";
+    d.version = "0.25.17";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
