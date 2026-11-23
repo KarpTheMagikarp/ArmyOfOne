@@ -423,6 +423,7 @@ struct Spawn {
 };
 Spawn g_spawn;
 ULONGLONG g_landCheckAt = 0, g_landGiveUp = 0, g_landSeenAt = 0, g_rescueAt = 0;
+bool g_held = false;
 Vec4 g_landTarget{}, g_stationPos{};
 int g_rescues = 0;
 // where to go if the floor's gone: the save's trail, newest first, then the
@@ -716,6 +717,8 @@ ULONGLONG g_roamMs = 0, g_roamAt = 0;
 // the note count once it was her and not the stand-in after the load: an area
 // box after that is one she walked through, the stand-in's box isn't hers
 unsigned g_realFrom = ~0u;
+// Debug only: her height for the first few seconds she's real after a load
+ULONGLONG g_heightTraceUntil = 0, g_heightTraceAt = 0;
 // and the map set then: a swap box she walks over after that is hers too
 std::string g_realSet;
 // the journal as a save of ours was asked for, for its .where
@@ -1881,6 +1884,7 @@ void TryArm(int marker) {
         g_landSeenAt = g_rescueAt = 0;
         g_rescues = 0;
         g_fallbackAt = -1;
+        g_held = false;
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
         Log("slot %d: start marker %d answers with %.2f %.2f %.2f, %u things to check the field for once it's up",
@@ -2004,6 +2008,18 @@ void TickLoad(int state) {
     const bool standIn = std::fabs(at.v[0]) < 0.01f && std::fabs(at.v[1] - 1.5f) < 0.01f && std::fabs(at.v[2] + 10.0f) < 0.01f;
     const float flat = read && !standIn ? std::hypot(at.v[0] - g_landTarget.v[0], at.v[2] - g_landTarget.v[2]) : 1e9f;
     const float drop = g_landTarget.v[1] - at.v[1];
+    // the replay hasn't run yet, so a floor it puts back (a lift parked where
+    // a scene left it) isn't there either: keep her on the spot till it has,
+    // rather than let her drop through to whatever's below (Ch 9, Nov 22)
+    if (g_worldCheckWanted && g_fallbackAt < 0 && flat < 3.0f && drop > 1.0f) {
+        if (now - g_rescueAt >= 150) {
+            if (!g_held) Log("held her on the spot till the field's put back (she was at %.2f)", at.v[1]);
+            g_held = true;
+            g_setPosFlash(handle, g_landTarget.v, 0);
+            g_rescueAt = now;
+        }
+        return;
+    }
     // straight down, not walking off down some stairs: those cover more ground than height
     if (flat < 3.0f && drop > 1.0f && flat < drop) {
         char why[96];
@@ -2399,7 +2415,16 @@ void Tick() {
         if (Position(PlayerHandle(), at) && !StandIn(at)) {
             g_realFrom = g_notes.load();
             g_realSet = MapSetName();
+            // a fall gets caught in the first metre, before she lands in a
+            // fight on the floor below. 2.5 s in she'd already dropped 11 m
+            if (g_landCheckAt) g_landCheckAt = now;
+            g_heightTraceUntil = g_debug ? now + 4000 : 0;
         }
+    }
+    if (g_heightTraceUntil && now < g_heightTraceUntil && now - g_heightTraceAt >= 250 && state == kStateFieldIdle) {
+        Vec4 at{};
+        if (Position(PlayerHandle(), at)) Log("  after the load: %.2f %.2f %.2f", at.v[0], at.v[1], at.v[2]);
+        g_heightTraceAt = now;
     }
     if (g_worldCheckWanted && state == kStateFieldIdle && g_roamMs > 1000 &&
         (now - g_lastNoteAt.load() > 1000 || g_roamMs > 6000)) {
