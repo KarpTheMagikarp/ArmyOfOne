@@ -338,14 +338,14 @@ def test_after_a_story_beat_it_saves_only_what_a_load_can_put_back():
 def test_a_floor_thats_gone_on_load_is_caught_whatever_moved_it():
     """
     lifts, sideways platforms, a save in mid air: if the floor isn't where it
-    was once the field's rebuilt you drop, and a straight drop of more than a
-    step sends you to the station. Stairs cover more ground than height, so
-    walking off down them isn't a drop
+    was once the field's rebuilt she sinks with nothing under her, and that
+    moves her on. On the level's floor only a whole floor down counts, and
+    stairs cover more ground than height, so walking off down them isn't one
     """
     source = SOURCE.read_text(encoding="utf-8")
     body = source[source.index("void TickLoad(int state) {"):]
     body = body[:body.index("\n}\n")]
-    assert "if (flat < 3.0f && drop > 1.0f && flat < drop) {" in body
+    assert "const bool sinking = solid ? drop > 2.0f && flat < drop : drop > 0.3f;" in body
     assert "NextFallback(handle, now, why);" in body
     assert "g_rescues < 3" in body
 
@@ -852,3 +852,26 @@ def test_a_scene_that_moves_her_holds_save_till_she_walks_off():
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
     assert withheld.index("if (g_rode)") < withheld.index("if (!g_idleSolid")
+
+
+def test_a_late_floor_gets_a_few_seconds_before_she_moves_on():
+    """
+    Ch 9, Nov 22: the lift's apron by the button held when walked onto a few
+    seconds after a load and not when dropped onto in the first second. So
+    sinking with nothing under her puts her back on the spot every frame for
+    8 s after the replay (3 s for a fallback) before it counts as gone, and
+    never before the replay's even run
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    land = source[source.index("void TickLoad(int state) {"):]
+    land = land[:land.index("\n}\n")]
+    sink = land.index("if (flat < 3.0f && sinking) {")
+    window = land[sink:sink + 900]
+    assert "g_worldCheckWanted || now - from < (g_fallbackAt < 0 ? 8000u : 3000u)" in window
+    assert window.index("g_setPosFlash(handle, g_landTarget.v, 0);") < window.index("NextFallback(handle, now, why);")
+    assert "foot.solid" in land[:sink]
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    check = tick.index("CheckWorld();")
+    assert "g_settleFrom = now;" in tick[check:check + 200]
+
