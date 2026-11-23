@@ -837,8 +837,10 @@ def test_a_scene_that_moves_her_holds_save_till_she_walks_off():
     """
     the button cutscene stood her on the lift it brought down and the game
     calls a parked lift floor, so the footing check passed a save on it. A
-    scene that moves her over 2 m latches the ride guard where it left her:
-    6 m of floor before Save, and nothing closer on the trail
+    scene that moves her over 2 m latches the ride guard where it left her,
+    and nothing closer goes on the trail. A lift needs 6 m off it, a scene's
+    spot only a metre: the Ch 9 jump's landing has less than 6 m of walkway
+    before the button, and the slab it lands her on is the moving-piece check's
     """
     source = SOURCE.read_text(encoding="utf-8")
     tick = source[source.index("void Tick() {"):]
@@ -851,6 +853,8 @@ def test_a_scene_that_moves_her_holds_save_till_she_walks_off():
     assert "std::hypot(at.v[0] - g_sceneFrom.v[0], at.v[2] - g_sceneFrom.v[2]) > 2.0f" in after
     # and a load's own scene never latches it (Ch 9, Nov 22: every load logged one)
     assert "g_sceneSince >= 0 && !g_worldCheckWanted && g_sanctioned.story >= 0" in after
+    assert "constexpr float kOffRide = 6.0f;" in source and "constexpr float kOffScene = 1.0f;" in source
+    assert "(g_rodeByScene ? kOffScene : kOffRide);" in tick
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
     assert withheld.index("if (g_rode)") < withheld.index("if (!g_idleSolid")
@@ -902,19 +906,21 @@ def test_the_layers_under_her_are_surveyed_at_each_debug_pause_and_nothing_hooks
 
 def test_save_stays_off_on_a_moving_piece_of_the_level():
     """
-    every spot that dropped her on load read layer 16 at her feet and the
-    plain floor beside them read nothing, so Save asks the same ray for 16
-    through the half metre either side of her feet. It's the last check,
-    being a call into the engine, and no world means no answer rather than
-    a no
+    the level's own floor isn't in the engine's ray world, only the stuff it
+    moves: every spot that dropped her on load read layer 16 at her feet, the
+    Ch 9 slab reads it before the button too, and plain floor reads nothing.
+    So Save asks the same ray for anything but her body and the plane under
+    the field, through the half metre either side of her feet. It's the last
+    check, being a call into the engine, and no world means no answer rather
+    than a no
     """
     source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr int kMovingLayer = 1 << 16;" in source
+    assert "constexpr int kNotFloorLayers = ~((1 << 1) | (1 << 14));" in source
     piece = source[source.index("bool OnMovingPiece(const Vec4& at) {"):]
     piece = piece[:piece.index("\n}\n")]
     assert "if (!world) return false;" in piece
     assert "at.v[1] + 0.5f" in piece and "at.v[1] - 0.5f" in piece
-    assert "kMovingLayer) & 0xFF" in piece
+    assert "kNotFloorLayers) & 0xFF" in piece
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
     assert withheld.index("if (Carried())") < withheld.index("OnMovingPiece(at)")

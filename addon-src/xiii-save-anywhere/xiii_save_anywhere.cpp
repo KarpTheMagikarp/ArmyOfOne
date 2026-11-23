@@ -119,12 +119,13 @@ constexpr DWORD kActorMatrix = 0x78, kActorTranslation = 0xA8;
 // all (Nov 23), but the same world, so it says what's under her on any layer
 constexpr DWORD kGroundRayRva = 0x5B000, kGroundWorldRva = 0x23FCEB4;
 constexpr unsigned char kGroundRayHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x89, 0x4D, 0xF4, 0x51, 0x89, 0x65};
-// the level's moving pieces live on layer 16 of that world: the Ch 9 lift's
-// apron and the slopes beside it read 16 right at her feet, the plain walkway
-// next to them reads nothing, and every spot that dropped her on load was a
-// 16 one (survey, Nov 23). The level's own floor isn't in that world at all,
-// and it's the only thing a spawned body lands on
-constexpr int kMovingLayer = 1 << 16;
+// the level's own floor isn't in that world at all, and it's the only thing a
+// spawned body lands on. What is in it is the stuff the level moves: the Ch 9
+// lift's slab reads layer 16 at her feet before the button and after it, and
+// every spot that dropped her on load was a 16 one (Nov 23). So anything under
+// her feet besides her own body (14) and the flat plane under the field (1)
+// isn't floor a load can stand her on
+constexpr int kNotFloorLayers = ~((1 << 1) | (1 << 14));
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
 constexpr DWORD kZoneLoadRva = 0x7EB3A4;        // mov ecx, [zone] in Zone's trigger native
@@ -1230,6 +1231,10 @@ bool g_rodeByScene = false;
 Vec4 g_sceneFrom{};
 bool g_sceneFromRead = false;
 constexpr float kOffRide = 6.0f;
+// a scene's spot only has to be stepped off: what it could stand her on is the
+// slab the moving-piece check already catches, and 6 m off the Ch 9 jump's
+// landing is further than that walkway goes before the button (Nov 23)
+constexpr float kOffScene = 1.0f;
 // the vertical run that's building: same direction every sample, steeper than 45
 float g_runDy = 0;
 ULONGLONG g_runMs = 0;
@@ -1717,9 +1722,10 @@ bool CanSave() {
 }
 
 // Debug only, at each pause: which collision layers the engine's ray finds
-// under her, one bit at a time, to keep checking layer 16 against spots that
-// load and spots that drop her as the testing moves through the game. 14 is
-// her own body at the ray's start, 1 a flat plane under the whole field
+// under her, one bit at a time, to keep checking the Save gate's layers
+// against spots that load and spots that drop her as testing moves through
+// the game. 14 is her own body at the ray's start, 1 a flat plane under the
+// whole field
 void SurveyLayers(const Vec4& at) {
     void* world = *reinterpret_cast<void**>(g_base + kGroundWorldRva);
     if (!world) return;
@@ -1741,7 +1747,7 @@ void SurveyLayers(const Vec4& at) {
     Log("%s", line);
 }
 
-// standing on a moving piece: the same ray, layer 16, through the half metre
+// standing on something the level moves: the same ray through the half metre
 // either side of her feet. No world to ask means no answer, not a no
 bool OnMovingPiece(const Vec4& at) {
     void* world = *reinterpret_cast<void**>(g_base + kGroundWorldRva);
@@ -1749,7 +1755,7 @@ bool OnMovingPiece(const Vec4& at) {
     alignas(16) const float from[4] = {at.v[0], at.v[1] + 0.5f, at.v[2], 1.0f};
     alignas(16) const float to[4] = {at.v[0], at.v[1] - 0.5f, at.v[2], 1.0f};
     alignas(16) float hit[16]{};
-    return reinterpret_cast<GroundRayFn>(g_base + kGroundRayRva)(world, nullptr, from, to, hit, kMovingLayer) & 0xFF;
+    return reinterpret_cast<GroundRayFn>(g_base + kGroundRayRva)(world, nullptr, from, to, hit, kNotFloorLayers) & 0xFF;
 }
 
 // whether Save goes on the bar, and why not when it doesn't
@@ -1798,8 +1804,8 @@ const char* Withheld() {
     // last, being a call into the engine
     Vec4 at{};
     if (Position(PlayerHandle(), at) && OnMovingPiece(at))
-        return "she's standing on a moving piece of the level (a lift's apron, a slope it brought down), which a load "
-               "can't set her back on";
+        return "she's standing on something the level moves (a lift, the slab beside one), which a load can't set "
+               "her back on";
     return nullptr;
 }
 
@@ -2378,7 +2384,8 @@ void Tick() {
             // after a scene too, now a save can come after one: the trail is
             // where a load with no floor at the spot lands you, so it has to be
             // floor you've walked since
-            const bool offRide = !g_rode || std::hypot(next.pos.v[0] - g_rodeAt.v[0], next.pos.v[2] - g_rodeAt.v[2]) >= kOffRide;
+            const bool offRide = !g_rode || std::hypot(next.pos.v[0] - g_rodeAt.v[0], next.pos.v[2] - g_rodeAt.v[2]) >=
+                                                  (g_rodeByScene ? kOffScene : kOffRide);
             if (Steady(rise) && !carried && g_idleSolid && offRide) {
                 if (g_rode)
                     Log("off %s, at %.2f %.2f %.2f", g_rodeByScene ? "where the scene left her" : "the lift", next.pos.v[0],
@@ -2892,7 +2899,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.21, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.22, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2932,7 +2939,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.21";
+    d.version = "0.25.22";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
