@@ -854,26 +854,24 @@ def test_a_scene_that_moves_her_holds_save_till_she_walks_off():
     assert withheld.index("if (g_rode)") < withheld.index("if (!g_idleSolid")
 
 
-def test_a_late_floor_gets_a_few_seconds_before_she_moves_on():
+def test_a_fall_after_the_replay_moves_her_on_that_frame():
     """
-    Ch 9, Nov 22: the lift's apron by the button held when walked onto a few
-    seconds after a load and not when dropped onto in the first second. So
-    sinking with nothing under her puts her back on the spot every frame for
-    8 s after the replay (3 s for a fallback) before it counts as gone, and
-    never before the replay's even run
+    Ch 9, Nov 22: the lift's apron by the button holds her when she walks onto
+    it but not when she's dropped or set onto it. Holding her on the spot set
+    her back on it and she was snapped 12 m down to the deck in one frame,
+    where no move takes. So once the replay's run, the first sink with nothing
+    under her moves her on, and nothing before the replay does
     """
     source = SOURCE.read_text(encoding="utf-8")
     land = source[source.index("void TickLoad(int state) {"):]
     land = land[:land.index("\n}\n")]
+    wait = land.index("if (g_worldCheckWanted) return;")
     sink = land.index("if (flat < 3.0f && sinking) {")
-    window = land[sink:sink + 900]
-    assert "g_worldCheckWanted || now - from < (g_fallbackAt < 0 ? 8000u : 3000u)" in window
-    assert window.index("g_setPosFlash(handle, g_landTarget.v, 0);") < window.index("NextFallback(handle, now, why);")
-    assert "foot.solid" in land[:sink]
-    tick = source[source.index("void Tick() {"):]
-    tick = tick[:tick.index("\n}\n")]
-    check = tick.index("CheckWorld();")
-    assert "g_settleFrom = now;" in tick[check:check + 200]
+    assert wait < sink
+    assert "foot.solid" in land[wait:sink]
+    window = land[sink:sink + 400]
+    assert "NextFallback(handle, now, why);" in window and "g_setPosFlash" not in window
+    assert "g_settle" not in source
 
 
 def test_a_fallback_skips_the_piece_that_failed_and_a_lost_landing_holds_save():

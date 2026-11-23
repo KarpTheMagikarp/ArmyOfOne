@@ -430,11 +430,6 @@ int g_rescues = 0;
 // station. -1 is the spot itself
 Vec4 g_fallback[6]{};
 int g_fallbackCount = 0, g_fallbackAt = -1;
-// when the current target's floor had its chance to show up from, and how
-// many times she's been put back on it waiting
-ULONGLONG g_settleFrom = 0;
-bool g_settling = false;
-int g_settles = 0;
 // spots whose floor never came, so the next try isn't on the same piece
 Vec4 g_failed[8]{};
 int g_failedCount = 0;
@@ -1909,9 +1904,6 @@ void TryArm(int marker) {
         g_rescues = 0;
         g_fallbackAt = -1;
         g_held = false;
-        g_settleFrom = 0;
-        g_settling = false;
-        g_settles = 0;
         g_failedCount = 0;
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
@@ -2011,9 +2003,8 @@ bool OnFailedPiece(const Vec4& at) {
 // that doesn't care what kind of platform it was: if the floor you saved on is
 // there in the rebuilt field you stand on it, and if it isn't (a lift back at
 // its start, a platform somewhere else on its path, a save in mid air) you're
-// held on the spot a while in case it's just late, then moved on before you
-// land anywhere: to ground you walked on before, newest first and off the
-// piece that failed, and the station last. Each of those gets the same
+// moved on before you land anywhere: to ground you walked on before, newest
+// first and off the piece that failed, and the station last. Each of those gets the same
 // check. Right after a load the handle points at a stand-in for a few
 // seconds, so only reads by the target count
 void NextFallback(DWORD handle, ULONGLONG now, const char* why) {
@@ -2022,8 +2013,6 @@ void NextFallback(DWORD handle, ULONGLONG now, const char* why) {
     int skipped = 0;
     while (++g_fallbackAt < g_fallbackCount && OnFailedPiece(g_fallback[g_fallbackAt])) ++skipped;
     if (skipped) Log("  skipped %d spots you walked that sit on the same stretch", skipped);
-    g_settleFrom = now;
-    g_settling = false;
     if (g_fallbackAt > g_fallbackCount) {
         Log("%s, and there's nowhere left to try, staying put", why);
         g_landCheckAt = 0;
@@ -2072,36 +2061,20 @@ void TickLoad(int state) {
         }
         return;
     }
+    if (g_worldCheckWanted) return;
     Footing foot;
     const bool solid = read && !standIn && ReadFooting(handle, foot) && foot.solid;
-    // nothing under her, or a whole floor down. A floor can turn up a beat
-    // after the field's put back: the Ch 9 lift's apron held when walked onto
-    // 3 s after a load and not when dropped onto in the first second (Nov
-    // 22). So she's kept on the target a while before it counts as gone, and
-    // put back every frame she sinks so she never builds up a fall
+    // nothing under her, or a whole floor down, and she moves on that frame.
+    // Putting her back on the spot doesn't help: the Ch 9 lift's apron holds
+    // her when she walks onto it but not when she's dropped or set onto it, and
+    // set back on it she was snapped 12 m down to the deck in one frame, where
+    // no move takes (Nov 22, three loads)
     const bool sinking = solid ? drop > 2.0f && flat < drop : drop > 0.3f;
     if (flat < 3.0f && sinking) {
-        const ULONGLONG from = g_settleFrom ? g_settleFrom : g_landCheckAt;
-        if (g_worldCheckWanted || now - from < (g_fallbackAt < 0 ? 8000u : 3000u)) {
-            if (!g_settling) Log("nothing under her at %.2f yet, keeping her on the spot", at.v[1]);
-            g_settling = true;
-            ++g_settles;
-            g_setPosFlash(handle, g_landTarget.v, 0);
-            g_landSeenAt = 0;
-            return;
-        }
-        char why[112];
-        std::snprintf(why, sizeof why, "the floor at %.2f %.2f %.2f never came, %d holds", g_landTarget.v[0],
-                      g_landTarget.v[1], g_landTarget.v[2], g_settles);
-        g_settles = 0;
+        char why[96];
+        std::snprintf(why, sizeof why, "dropped to %.2f %.2f %.2f, the floor isn't there", at.v[0], at.v[1], at.v[2]);
         NextFallback(handle, now, why);
         return;
-    }
-    if (g_settling && solid && flat < 3.0f) {
-        const ULONGLONG from = g_settleFrom ? g_settleFrom : g_landCheckAt;
-        Log("the floor's there now, %.1f s in, after %d holds", (now - from) / 1000.0, g_settles);
-        g_settling = false;
-        g_settles = 0;
     }
     if (flat < 3.0f) {
         if (!g_landSeenAt) g_landSeenAt = now;
@@ -2524,8 +2497,6 @@ void Tick() {
         if (Position(PlayerHandle(), at) && !StandIn(at)) {
             g_worldCheckWanted = false;
             CheckWorld();
-            // what the replay put back gets its own few seconds to turn up
-            g_settleFrom = now;
         }
     }
     if (state == kStateFieldPause && g_lastState != kStateFieldPause && g_phase == Phase::Idle && g_enabled) {
@@ -2901,7 +2872,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.12, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.13, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2941,7 +2912,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.12";
+    d.version = "0.25.13";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
