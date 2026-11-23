@@ -2834,7 +2834,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.10, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.11, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -2874,7 +2874,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.10";
+    d.version = "0.25.11";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
