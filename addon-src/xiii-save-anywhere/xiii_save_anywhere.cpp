@@ -312,10 +312,11 @@ using ResolveActorFn = unsigned char*(__fastcall*)(void*, void*, int);
 using LockFn = void(__fastcall*)(void*, void*, void*);
 using UnlockFn = void(__fastcall*)(void*, void*);
 using SetPosFlashFn = void(__cdecl*)(DWORD, const float*, int);
-// what Chara.setPosFlash passes and Chara.setPos doesn't: it sets bit 21 of
-// the actor's flags at +0x6C, which moves her physics body along with the
-// matrix. Without it every move we made was undone by the body a frame later:
-// the watch caught the body writing her back 12 m down after each one, so the
+// what Chara.setPosFlash passes and Chara.setPos doesn't: bit 21 of the
+// actor's flags at +0x6C, carried a frame as bit 22 (0x7BFCA0). The character
+// controllers only rebuild her body from the matrix when 0x61F6C0 sees one of
+// those, so without it every move we made was undone by the body a frame
+// later. The watch caught it writing her back 12 m down after each one: the
 // station and fallback moves "didn't take" because they never happened
 // (Ch 9, Nov 23)
 constexpr int kWarp = 1;
@@ -441,6 +442,9 @@ int g_fallbackCount = 0, g_fallbackAt = -1;
 // spots whose floor never came, so the next try isn't on the same piece
 Vec4 g_failed[8]{};
 int g_failedCount = 0;
+// a second look a beat after setting her down on the spot post-replay, in
+// case what the replay put back only gets its collision on the next frames
+ULONGLONG g_reseatAt = 0;
 // the load ended up at the station or nowhere: whatever state that is, it
 // isn't one to write over a good save with
 bool g_lostLanding = false;
@@ -2066,6 +2070,7 @@ void TryArm(int marker) {
         g_rescues = 0;
         g_fallbackAt = -1;
         g_held = false;
+        g_reseatAt = 0;
         g_failedCount = 0;
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
@@ -2224,6 +2229,16 @@ void TickLoad(int state) {
         return;
     }
     if (g_worldCheckWanted) return;
+    if (g_reseatAt) {
+        if (now < g_reseatAt) return;
+        g_reseatAt = 0;
+        if (flat < 3.0f && drop > 0.5f) {
+            Log("still under the spot a beat after the replay (at %.2f), setting her down again", at.v[1]);
+            g_setPosFlash(handle, g_landTarget.v, kWarp);
+            g_landSeenAt = 0;
+            return;
+        }
+    }
     // straight down, and she moves on that frame. A walk or a hop off a step
     // covers more ground than height: 0.25.13 read a jump next to the spot as a
     // fall and sent her to the station (Nov 23)
@@ -2664,6 +2679,7 @@ void Tick() {
                 std::hypot(at.v[0] - g_landTarget.v[0], at.v[2] - g_landTarget.v[2]) < 3.0f) {
                 Log("set her back down on the spot now the field's put back");
                 g_setPosFlash(PlayerHandle(), g_landTarget.v, kWarp);
+                g_reseatAt = now + 300;
             }
         }
     }
@@ -3040,7 +3056,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.15, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.16, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3080,7 +3096,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.15";
+    d.version = "0.25.16";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

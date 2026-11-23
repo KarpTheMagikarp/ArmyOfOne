@@ -878,6 +878,11 @@ def test_every_move_warps_her_body_and_the_replay_sets_her_down_again():
     tick = tick[:tick.index("\n}\n")]
     reseat = tick[tick.index("if (CheckWorld() && g_landCheckAt && g_fallbackAt < 0 &&"):]
     assert "g_setPosFlash(PlayerHandle(), g_landTarget.v, kWarp);" in reseat[:400]
+    assert "g_reseatAt = now + 300;" in reseat[:500]
+    # and a second look a beat later, before any fall check, in case the
+    # floor the replay put back only collides from the next frames
+    again = land.index("if (g_reseatAt) {")
+    assert wait < again < sink
 
 
 def test_a_fallback_skips_the_piece_that_failed_and_a_lost_landing_holds_save():
