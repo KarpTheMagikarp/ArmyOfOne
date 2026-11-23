@@ -438,12 +438,6 @@ int g_fallbackCount = 0;
 // the spot dropped her: whatever state she's in now, it isn't one to write
 // over a good save with
 bool g_lostLanding = false;
-// the field ops that go back before she's even in the field, once per load.
-// Its objects may not all be loaded on the rebuild's first call, so what got
-// turned down goes again next frame, for a second or so
-bool g_earlyDone = false;
-int g_earlyTries = 0;
-unsigned g_armFieldNotes = 0;
 
 void* Zone() { return *g_zoneSlot; }
 
@@ -742,8 +736,6 @@ int g_worldLines = 0;
 std::atomic<ULONGLONG> g_lastNoteAt{0};
 // every call the journal kept, ever, so a scene can tell whether it touched the field
 std::atomic<unsigned> g_notes{0};
-// areas, boxes and bg anims only: the rebuild's first of these means the scene's up
-std::atomic<unsigned> g_fieldNotes{0};
 unsigned g_notesAtScene = 0;
 // the calls a load can't put back yet (a chara made or let go, who you can
 // talk to, a path edge), counted the same way, and where the count stood at
@@ -818,7 +810,6 @@ void Note(Op op, const char* a, const char* b, int i, int j) {
     e.i = i;
     e.j = j;
     e.seq = ++g_notes;
-    if (Kind(op) <= 2) ++g_fieldNotes;
     const int zone = ZoneNumber();
     if (zone != g_worldZone) ForgetWorld("a new zone");
     EnterCriticalSection(&g_worldLock);
@@ -1877,12 +1868,37 @@ bool CanSave() {
     return g_findSavePointRow() != nullptr && PlayerHandle() != 0xFFFFFFFF;
 }
 
+// Debug only: what the player controller's own ground rays (two call sites
+// in 0x626240) ask and get, to pin down why ours always came back empty and
+// why a load onto plain walkway near the Ch 9 lift went through once the lift
+// was back before the spawn (0.25.17/18, Nov 23). First 40 after each load,
+// then one in 60, 300 lines in all
+GroundRayFn g_groundRay = nullptr;
+ULONGLONG g_rayBurstUntil = 0;
+int g_rayLines = 0, g_rayBurst = 0, g_raySkip = 0;
+
+int __fastcall GroundRayHook(void* world, void* edx, const float* from, const float* to, float* hit, int layers) {
+    const int got = g_groundRay(world, edx, from, to, hit, layers);
+    const DWORD caller = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) - g_base);
+    if (caller != 0x227484 && caller != 0x22758E) return got;
+    const bool burst = g_rayBurst > 0 && GetTickCount64() < g_rayBurstUntil;
+    if (g_rayLines >= 300 || (!burst && ++g_raySkip % 60)) return got;
+    if (burst) --g_rayBurst;
+    ++g_rayLines;
+    Log("  their ray %x: %p %.2f %.2f %.2f to %.2f %.2f %.2f w %.2f/%.2f, layers %x: %s %.2f %.2f %.2f / %.2f %.2f %.2f",
+        static_cast<unsigned>(caller), world, from[0], from[1], from[2], to[0], to[1], to[2], from[3], to[3],
+        static_cast<unsigned>(layers), (got & 0xFF) ? "hit" : "nothing", hit[1], hit[2], hit[3], hit[5], hit[6],
+        hit[7]);
+    return got;
+}
+
 // the floor a load would set her on: the engine's own ray from half a metre
 // above her feet to 2 m under them. Its hit block has a point and a normal and
 // which is which isn't pinned yet, so the one under her is the point
 bool GroundUnder(const Vec4& at, float& y) {
     void* world = *reinterpret_cast<void**>(g_base + kGroundWorldRva);
     if (!world) return false;
+    if (g_debug) Log("  our ray: %p", world);
     alignas(16) float from[4] = {at.v[0], at.v[1] + 0.5f, at.v[2], 1.0f};
     alignas(16) float to[4] = {at.v[0], at.v[1] - 2.0f, at.v[2], 1.0f};
     alignas(16) float hit[16]{};
@@ -2113,9 +2129,6 @@ void TryArm(int marker) {
     g_realFrom = ~0u;
     g_spotUsed = false;
     g_lostLanding = false;
-    g_earlyDone = false;
-    g_earlyTries = 0;
-    g_armFieldNotes = g_fieldNotes.load();
     g_pendingWanted = false;
     g_pendingMapSet = "-";
     g_pendingZone = -1;
@@ -2390,19 +2403,6 @@ void Moment(const char* what) {
 // once a load's rebuild is done: a save of ours gets back whatever the
 // station's load script didn't do, and with Debug on a station save's load
 // says what the game's own rebuild missed, which is what this is all for
-// the floor-making part of the journal, before she's in the field. Box
-// triggered areas wait for the full replay, which knows where she came up,
-// and so does anything the rebuild changes after this
-void EarlyReplay() {
-    const std::vector<Entry> missing = Missing(g_pending, WorldNow(), nullptr, false);
-    int put = 0, refused = 0;
-    for (const Entry& e : missing)
-        if (Kind(e.op) <= 2) (Replay(e) ? put : refused)++;
-    if (put || !refused) Log("put %d areas, boxes and bg anims back before she's in the field", put);
-    if (refused && ++g_earlyTries < 60) g_earlyDone = false;
-    else if (refused) Log("  %d of them never took before she was in the field, the full replay tries again", refused);
-}
-
 void CheckWorld() {
     Moment("loaded, the station's rebuild is done");
     const std::vector<Entry> have = WorldNow();
@@ -2483,16 +2483,6 @@ void Tick() {
         g_restartPoint = false;
     }
     TickWatch(state);
-    // her body starts falling the moment it spawns, so a floor the journal
-    // puts back has to be there before that, not a second into free roam: the
-    // Ch 9 apron wasn't, and she was 4 m under it by the time it came back
-    // (Nov 23). The rebuild's first area, box or bg anim call means the scene
-    // is up, and the real her spawns after its calls
-    if (g_pendingWanted && !g_earlyDone && g_pendingZone == g_worldZone && g_fieldNotes.load() != g_armFieldNotes &&
-        *reinterpret_cast<void**>(g_base + kSceneRva)) {
-        g_earlyDone = true;
-        EarlyReplay();
-    }
     const Sample& prev = g_track[(g_trackNext + 15) % 16];
     if (state == kStateFieldIdle && now - prev.at >= 40) {
         Matrix m{};
@@ -2679,6 +2669,8 @@ void Tick() {
             // fight on the floor below. 2.5 s in she'd already dropped 11 m
             if (g_landCheckAt) g_landCheckAt = now;
             g_heightTraceUntil = g_debug ? now + 4000 : 0;
+            g_rayBurstUntil = now + 8000;
+            g_rayBurst = 40;
         }
     }
     if (g_heightTraceUntil && now < g_heightTraceUntil && now - g_heightTraceAt >= 250 && state == kStateFieldIdle) {
@@ -3066,7 +3058,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.18, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.19, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3088,7 +3080,7 @@ DWORD WINAPI Worker(LPVOID) {
               reinterpret_cast<LPVOID*>(&g_pauseMode)) ||
         !Hook(reinterpret_cast<LPVOID>(g_base + kTextSetIdRva), reinterpret_cast<LPVOID>(&TextSetIdHook),
               reinterpret_cast<LPVOID*>(&g_textSetId)) ||
-        !HookWorld()) {
+        !HookWorld() || (g_debug && !HookAt(kGroundRayRva, &GroundRayHook, g_groundRay))) {
         // all or nothing: the input side without the save hooks would keep
         // spots it can never match to a slot
         MH_DisableHook(MH_ALL_HOOKS);
@@ -3106,7 +3098,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.18";
+    d.version = "0.25.19";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

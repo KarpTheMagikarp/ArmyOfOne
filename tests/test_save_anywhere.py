@@ -815,29 +815,25 @@ def test_a_cutscene_a_callback_loaded_for_later_comes_back_with_the_save():
     assert "op < 0 || op > static_cast<int>(Op::Cutscene) ||" in source
 
 
-def test_the_floor_goes_back_before_she_spawns():
+def test_the_field_goes_back_after_she_lands_not_before():
     """
-    Ch 9: a save on the lift's apron, which the button cutscene brought down.
-    Her body starts falling the moment it spawns, and the replay a second into
-    free roam was too late: she was 4 m under the apron by then, and no move
-    after the spawn ever took (Nov 23). So the areas, boxes and bg anims go
-    back on the rebuild's first call, before the real her is in the field,
-    again next frame for anything turned down, and the fall check still waits
-    for the full replay
+    0.25.17 put the lift and its apron back before she spawned, and a load
+    onto plain walkway near the lift went through as well as the apron, where
+    with the replay after the landing (0.25.10) walkway loads there held. So
+    the replay waits for her, and a refused bg anim stays out of the journal.
+    With Debug on, the controller's own ground rays are logged after a load
     """
     source = SOURCE.read_text(encoding="utf-8")
-    tick = source[source.index("void Tick() {"):]
-    tick = tick[:tick.index("\n}\n")]
-    assert ("if (g_pendingWanted && !g_earlyDone && g_pendingZone == g_worldZone && "
-            "g_fieldNotes.load() != g_armFieldNotes &&") in tick
-    early = source[source.index("void EarlyReplay() {"):]
-    early = early[:early.index("\n}\n")]
-    assert "Missing(g_pending, WorldNow(), nullptr, false)" in early and "Kind(e.op) <= 2" in early
-    assert "if (refused && ++g_earlyTries < 60) g_earlyDone = false;" in early
+    assert "EarlyReplay" not in source
     replay = source[source.index("bool Replay(const Entry& e) {"):]
     replay = replay[:replay.index("\n}\n")]
-    # a refused one stays out of the journal, so it's still missing next frame
     assert "if (took) Note(" in replay
+    hook = source[source.index("int __fastcall GroundRayHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "if (caller != 0x227484 && caller != 0x22758E) return got;" in hook
+    assert "(g_debug && !HookAt(kGroundRayRva, &GroundRayHook, g_groundRay))" in source
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
     real = tick.index("g_realFrom = g_notes.load();")
     assert "if (g_landCheckAt) g_landCheckAt = now;" in tick[real:real + 400]
 
