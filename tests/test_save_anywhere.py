@@ -847,6 +847,8 @@ def test_a_scene_that_moves_her_holds_save_till_she_walks_off():
     # a scene that changed nothing doesn't latch: the no-op check comes first
     assert after.index("g_sceneSince = -1;") < after.index("g_rodeByScene = true;")
     assert "std::hypot(at.v[0] - g_sceneFrom.v[0], at.v[2] - g_sceneFrom.v[2]) > 2.0f" in after
+    # and a load's own scene never latches it (Ch 9, Nov 22: every load logged one)
+    assert "g_sceneSince >= 0 && !g_worldCheckWanted && g_sanctioned.story >= 0" in after
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
     assert withheld.index("if (g_rode)") < withheld.index("if (!g_idleSolid")

@@ -2360,8 +2360,11 @@ void Tick() {
                 g_sceneSince = -1;
             }
         }
+        // a load's own scene isn't one: the quit to title, the station's load
+        // script and the spawn all run as scenes, and they move her by design
         Vec4 at{};
-        if (g_sceneSince >= 0 && g_sceneFromRead && Position(PlayerHandle(), at) &&
+        if (g_sceneSince >= 0 && !g_worldCheckWanted && g_sanctioned.story >= 0 && g_sceneFromRead &&
+            Position(PlayerHandle(), at) &&
             (std::hypot(at.v[0] - g_sceneFrom.v[0], at.v[2] - g_sceneFrom.v[2]) > 2.0f ||
              std::fabs(at.v[1] - g_sceneFrom.v[1]) > 1.0f)) {
             Log("the scene moved her to %.2f %.2f %.2f, Save waits till she's walked off it", at.v[0], at.v[1], at.v[2]);
