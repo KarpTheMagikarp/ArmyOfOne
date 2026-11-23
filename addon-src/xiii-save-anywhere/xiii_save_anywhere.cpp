@@ -114,7 +114,7 @@ constexpr DWORD kLockRva = 0x09D1A0, kUnlockRva = 0x09D220;  // thiscall(tag), t
 constexpr unsigned char kLockHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0x89, 0x4D, 0xEC, 0x83, 0x7D, 0x08};
 constexpr unsigned char kUnlockHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0x83, 0x78};
 constexpr DWORD kActorMatrix = 0x78, kActorTranslation = 0xA8;
-constexpr DWORD kSetPosFlashRva = 0x2C3450;     // cdecl(handle, const float pos[4], 0)
+constexpr DWORD kSetPosFlashRva = 0x2C3450;     // cdecl(handle, const float pos[4], warp)
 constexpr unsigned char kSetPosFlashHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x30, 0x0F, 0xBF, 0x45, 0x08};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
@@ -312,6 +312,13 @@ using ResolveActorFn = unsigned char*(__fastcall*)(void*, void*, int);
 using LockFn = void(__fastcall*)(void*, void*, void*);
 using UnlockFn = void(__fastcall*)(void*, void*);
 using SetPosFlashFn = void(__cdecl*)(DWORD, const float*, int);
+// what Chara.setPosFlash passes and Chara.setPos doesn't: it sets bit 21 of
+// the actor's flags at +0x6C, which moves her physics body along with the
+// matrix. Without it every move we made was undone by the body a frame later:
+// the watch caught the body writing her back 12 m down after each one, so the
+// station and fallback moves "didn't take" because they never happened
+// (Ch 9, Nov 23)
+constexpr int kWarp = 1;
 using PlayerHandleFn = DWORD*(__cdecl*)(DWORD*);
 using SaveWriteFn = int(__fastcall*)(unsigned char*, void*, int, int, const void*, int);
 using SaveReadFn = int(__fastcall*)(unsigned char*, void*, int, void*, int);
@@ -2188,7 +2195,7 @@ void NextFallback(DWORD handle, ULONGLONG now, const char* why) {
     }
     Log("%s, trying %s at %.2f %.2f %.2f", why, station ? "the station" : "where you walked before",
         g_landTarget.v[0], g_landTarget.v[1], g_landTarget.v[2]);
-    g_setPosFlash(handle, g_landTarget.v, 0);
+    g_setPosFlash(handle, g_landTarget.v, kWarp);
     g_rescueAt = now;
     g_rescues = 1;
     g_landSeenAt = 0;
@@ -2211,21 +2218,16 @@ void TickLoad(int state) {
         if (now - g_rescueAt >= 150) {
             if (!g_held) Log("held her on the spot till the field's put back (she was at %.2f)", at.v[1]);
             g_held = true;
-            g_setPosFlash(handle, g_landTarget.v, 0);
+            g_setPosFlash(handle, g_landTarget.v, kWarp);
             g_rescueAt = now;
         }
         return;
     }
     if (g_worldCheckWanted) return;
-    Footing foot;
-    const bool solid = read && !standIn && ReadFooting(handle, foot) && foot.solid;
-    // nothing under her, or a whole floor down, and she moves on that frame.
-    // Putting her back on the spot doesn't help: the Ch 9 lift's apron holds
-    // her when she walks onto it but not when she's dropped or set onto it, and
-    // set back on it she was snapped 12 m down to the deck in one frame, where
-    // no move takes (Nov 22, three loads)
-    const bool sinking = solid ? drop > 2.0f && flat < drop : drop > 0.3f;
-    if (flat < 3.0f && sinking) {
+    // straight down, and she moves on that frame. A walk or a hop off a step
+    // covers more ground than height: 0.25.13 read a jump next to the spot as a
+    // fall and sent her to the station (Nov 23)
+    if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {
         char why[96];
         std::snprintf(why, sizeof why, "dropped to %.2f %.2f %.2f, the floor isn't there", at.v[0], at.v[1], at.v[2]);
         NextFallback(handle, now, why);
@@ -2242,7 +2244,7 @@ void TickLoad(int state) {
         // spot got pulled back, then the next place along
         if (now - g_rescueAt < 1000) return;
         if (g_rescues < 3) {
-            g_setPosFlash(handle, g_landTarget.v, 0);
+            g_setPosFlash(handle, g_landTarget.v, kWarp);
             g_rescueAt = now;
             ++g_rescues;
             return;
@@ -2368,7 +2370,8 @@ void Moment(const char* what) {
 // once a load's rebuild is done: a save of ours gets back whatever the
 // station's load script didn't do, and with Debug on a station save's load
 // says what the game's own rebuild missed, which is what this is all for
-void CheckWorld() {
+// how many things it put back, so a load knows its floor may have just changed
+size_t CheckWorld() {
     Moment("loaded, the station's rebuild is done");
     const std::vector<Entry> have = WorldNow();
     int other = 0;
@@ -2382,7 +2385,7 @@ void CheckWorld() {
             Log("saved in zone %d but this is zone %d, leaving the field as the game built it", g_pendingZone,
                 g_worldZone);
             g_pending.clear();
-            return;
+            return 0;
         }
         // the area boxes' groups are the stretch of level around the spot, so
         // only there, on the map set it was saved on. Started at the station
@@ -2404,17 +2407,18 @@ void CheckWorld() {
         }
         for (const Entry& e : missing) Replay(e);
         g_pending.clear();
-        return;
+        return missing.size();
     }
-    if (!g_debug || g_loadedSlot < 0) return;
+    if (!g_debug || g_loadedSlot < 0) return 0;
     FILE* file = nullptr;
-    if (fopen_s(&file, StationWorldPath(g_loadedSlot).c_str(), "r") != 0 || !file) return;
+    if (fopen_s(&file, StationWorldPath(g_loadedSlot).c_str(), "r") != 0 || !file) return 0;
     std::vector<Entry> want;
     int zone = -1;
     const bool ok = ReadWorld(file, want, &zone);
     fclose(file);
     if (ok && zone == g_worldZone)
         LogMissing("a station load, against what was live when it saved", Missing(want, have, &other), other);
+    return 0;
 }
 
 unsigned char* g_pauseWidget = nullptr;
@@ -2652,7 +2656,15 @@ void Tick() {
         Vec4 at{};
         if (Position(PlayerHandle(), at) && !StandIn(at)) {
             g_worldCheckWanted = false;
-            CheckWorld();
+            // her body has been falling since the spawn, through whatever the
+            // replay only just put back (the Ch 9 apron: the matrix sat at the
+            // spawn while the body was already 4 m under it, Nov 23). So once
+            // it's back she's set down on the spot again, body and all
+            if (CheckWorld() && g_landCheckAt && g_fallbackAt < 0 &&
+                std::hypot(at.v[0] - g_landTarget.v[0], at.v[2] - g_landTarget.v[2]) < 3.0f) {
+                Log("set her back down on the spot now the field's put back");
+                g_setPosFlash(PlayerHandle(), g_landTarget.v, kWarp);
+            }
         }
     }
     if (state == kStateFieldPause && g_lastState != kStateFieldPause && g_phase == Phase::Idle && g_enabled) {
@@ -3028,7 +3040,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.14, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.15, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3068,7 +3080,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.14";
+    d.version = "0.25.15";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

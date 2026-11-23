@@ -345,7 +345,7 @@ def test_a_floor_thats_gone_on_load_is_caught_whatever_moved_it():
     source = SOURCE.read_text(encoding="utf-8")
     body = source[source.index("void TickLoad(int state) {"):]
     body = body[:body.index("\n}\n")]
-    assert "const bool sinking = solid ? drop > 2.0f && flat < drop : drop > 0.3f;" in body
+    assert "if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {" in body
     assert "NextFallback(handle, now, why);" in body
     assert "g_rescues < 3" in body
 
@@ -549,7 +549,7 @@ def test_what_the_scripts_did_to_the_field_goes_with_the_save():
                  "kEncountRva"):
         assert f"{{{site}, " in source
     assert "WriteWorld(file, g_savedWorld, g_savedZone, g_savedMapSet);" in source
-    check = source[source.index("void CheckWorld() {"):]
+    check = source[source.index("size_t CheckWorld() {"):]
     check = check[:check.index("\n}\n")]
     assert "Missing(g_pending, have, &other, boxes, g_realFrom)" in check and "Replay(e)" in check
     replay = source[source.index("void Replay(const Entry& e) {"):]
@@ -584,9 +584,9 @@ def test_a_load_waits_for_the_real_rebuild_before_putting_anything_back():
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
     wait = tick[tick.index("if (g_worldCheckWanted"):]
-    wait = wait[:wait.index("CheckWorld();")]
+    wait = wait[:wait.index("CheckWorld()")]
     assert "!StandIn(at)" in wait and "g_lastNoteAt" in wait
-    check = source[source.index("void CheckWorld() {"):]
+    check = source[source.index("size_t CheckWorld() {"):]
     assert check.index("g_pendingZone != g_worldZone") < check.index("Replay(e)")
 
 
@@ -700,7 +700,7 @@ def test_a_save_of_ours_gets_its_field_back_even_when_its_spot_cant_be_used():
     arm = source[source.index("void TryArm(int marker) {"):]
     arm = arm[:arm.index("\n}\n")]
     assert arm.index("if (ours && load.hash == stored && format >= 6) {") < arm.index("if (!ours) {")
-    check = source[source.index("void CheckWorld() {"):]
+    check = source[source.index("size_t CheckWorld() {"):]
     check = check[:check.index("\n}\n")]
     assert "if (g_pendingZone != g_worldZone) {" in check and "MapSetName()" not in check
     # only the area boxes' groups go by the map set, the one she came up on
@@ -753,7 +753,7 @@ def test_the_area_boxes_groups_come_back_with_the_spot():
     missing = missing[:missing.index("\n}\n")]
     assert "(FromBox(w) && !boxes)" in missing
     assert "FromBox(w) && it != have.end() && FromBox(*it) && it->seq > walked" in missing
-    check = source[source.index("void CheckWorld() {"):]
+    check = source[source.index("size_t CheckWorld() {"):]
     check = check[:check.index("\n}\n")]
     assert "g_spotUsed && g_realSet == g_pendingMapSet && read &&" in check and "< kBoxReach" in check
     fallback = source[source.index("void NextFallback("):]
@@ -824,7 +824,7 @@ def test_a_load_holds_her_on_the_spot_till_the_field_is_put_back():
     land = land[:land.index("\n}\n")]
     hold = land.index("if (g_worldCheckWanted && g_fallbackAt < 0 && flat < 3.0f && drop > 1.0f) {")
     assert hold < land.index("NextFallback(handle, now, why);")
-    assert "g_setPosFlash(handle, g_landTarget.v, 0);" in land[hold:hold + 400]
+    assert "g_setPosFlash(handle, g_landTarget.v, kWarp);" in land[hold:hold + 400]
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
     real = tick.index("g_realFrom = g_notes.load();")
@@ -854,24 +854,30 @@ def test_a_scene_that_moves_her_holds_save_till_she_walks_off():
     assert withheld.index("if (g_rode)") < withheld.index("if (!g_idleSolid")
 
 
-def test_a_fall_after_the_replay_moves_her_on_that_frame():
+def test_every_move_warps_her_body_and_the_replay_sets_her_down_again():
     """
-    Ch 9, Nov 22: the lift's apron by the button holds her when she walks onto
-    it but not when she's dropped or set onto it. Holding her on the spot set
-    her back on it and she was snapped 12 m down to the deck in one frame,
-    where no move takes. So once the replay's run, the first sink with nothing
-    under her moves her on, and nothing before the replay does
+    Ch 9, Nov 23: the hardware watch caught her physics body writing her back
+    after every move we made, because we called the engine's setPos with
+    warp off, which is Chara.setPos, not setPosFlash. The body had also been
+    falling since the spawn, through the apron the replay only put back later.
+    So every move warps, the replay sets her down on the spot again, and a
+    fall is straight down, not a hop next to the spot (0.25.13 sent a jump to
+    the station)
     """
     source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr int kWarp = 1;" in source
+    assert "g_landTarget.v, 0)" not in source
     land = source[source.index("void TickLoad(int state) {"):]
     land = land[:land.index("\n}\n")]
     wait = land.index("if (g_worldCheckWanted) return;")
-    sink = land.index("if (flat < 3.0f && sinking) {")
+    sink = land.index("if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {")
     assert wait < sink
-    assert "foot.solid" in land[wait:sink]
     window = land[sink:sink + 400]
     assert "NextFallback(handle, now, why);" in window and "g_setPosFlash" not in window
-    assert "g_settle" not in source
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    reseat = tick[tick.index("if (CheckWorld() && g_landCheckAt && g_fallbackAt < 0 &&"):]
+    assert "g_setPosFlash(PlayerHandle(), g_landTarget.v, kWarp);" in reseat[:400]
 
 
 def test_a_fallback_skips_the_piece_that_failed_and_a_lost_landing_holds_save():
