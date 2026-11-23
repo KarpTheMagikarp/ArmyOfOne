@@ -923,6 +923,14 @@ def test_save_stays_off_on_a_moving_piece_of_the_level():
     piece = source[source.index("bool OnMovingPiece(const Vec4& at) {"):]
     piece = piece[:piece.index("\n}\n")]
     assert "if (!world) return false;" in piece
+    # only in a field a script or cutscene has posed a bg anim in: Palumpolum's
+    # plaza reads 16 nearly everywhere and has none
+    assert piece.index("if (!g_fieldAnimates) return false;") < piece.index("void* world")
+    forget = source[source.index("void ForgetWorld(const char* why) {"):]
+    assert "g_fieldAnimates = false;" in forget[:forget.index("\n}\n")]
+    bg = source[source.index("int __fastcall BgAnimHook("):]
+    bg = bg[:bg.index("\n}\n")]
+    assert bg.index("if (kept) {") < bg.index("g_fieldAnimates = true;")
     assert "at.v[1] + 0.5f" in piece and "at.v[1] - 0.5f" in piece
     assert "kNotFloorLayers) & 0xFF" in piece
     withheld = source[source.index("const char* Withheld() {"):]

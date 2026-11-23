@@ -743,6 +743,11 @@ ULONGLONG g_roamMs = 0, g_roamAt = 0;
 unsigned g_realFrom = ~0u;
 // Debug only: her height for the first few seconds she's real after a load
 ULONGLONG g_heightTraceUntil = 0, g_heightTraceAt = 0;
+// a script or a cutscene has posed a bg anim since this field's journal
+// started, rebuild included. Palumpolum's plaza reads layer 16 nearly
+// everywhere and has none (Nov 23); the Ch 9 slab and the Ch 10 lift are
+// bg anims, and every drop was in a field with them
+std::atomic<bool> g_fieldAnimates{false};
 // the leader the setMatrix watch is after, and till when
 std::atomic<void*> g_watchActor{nullptr};
 std::atomic<ULONGLONG> g_watchUntil{0};
@@ -816,6 +821,7 @@ void ForgetWorld(const char* why) {
     EnterCriticalSection(&g_worldLock);
     const size_t had = g_world.size();
     g_world.clear();
+    g_fieldAnimates = false;
     g_worldZone = ZoneNumber();
     // the charas and talk changes of a field that's gone are gone with it.
     // What the new field's own setup does from here still counts
@@ -942,7 +948,10 @@ int __fastcall BgAnimHook(void* scene, void* edx, const char* object, int arg, c
     const DWORD rva = CallerRva(from);
     const bool kept = (FromScript(from) || rva == kCutsceneBgAnimA || rva == kCutsceneBgAnimB) && Named(object);
     const int out = g_bgAnim(scene, edx, object, arg, motion, mode);
-    if (kept) Note(Op::BgAnim, object, motion, arg, mode);
+    if (kept) {
+        g_fieldAnimates = true;
+        Note(Op::BgAnim, object, motion, arg, mode);
+    }
     return out;
 }
 
@@ -1783,8 +1792,11 @@ void SurveyLayers(const Vec4& at) {
 }
 
 // standing on something the level moves: the same ray through the half metre
-// either side of her feet. No world to ask means no answer, not a no
+// either side of her feet. No world to ask means no answer, not a no. In a
+// field nothing's posed, those pieces sit where the rebuild puts them, which
+// is what a load lands on: the Ch 9 slab held every pre-button load
 bool OnMovingPiece(const Vec4& at) {
+    if (!g_fieldAnimates) return false;
     void* world = *reinterpret_cast<void**>(g_base + kGroundWorldRva);
     if (!world) return false;
     alignas(16) const float from[4] = {at.v[0], at.v[1] + 0.5f, at.v[2], 1.0f};
@@ -2983,7 +2995,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.26, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.27, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3029,7 +3041,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.26";
+    d.version = "0.25.27";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
