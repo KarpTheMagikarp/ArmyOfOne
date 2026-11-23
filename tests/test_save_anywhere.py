@@ -820,18 +820,13 @@ def test_the_field_goes_back_after_she_lands_not_before():
     0.25.17 put the lift and its apron back before she spawned, and a load
     onto plain walkway near the lift went through as well as the apron, where
     with the replay after the landing (0.25.10) walkway loads there held. So
-    the replay waits for her, and a refused bg anim stays out of the journal.
-    With Debug on, the controller's own ground rays are logged after a load
+    the replay waits for her, and a refused bg anim stays out of the journal
     """
     source = SOURCE.read_text(encoding="utf-8")
     assert "EarlyReplay" not in source
     replay = source[source.index("bool Replay(const Entry& e) {"):]
     replay = replay[:replay.index("\n}\n")]
     assert "if (took) Note(" in replay
-    hook = source[source.index("int __fastcall GroundRayHook("):]
-    hook = hook[:hook.index("\n}\n")]
-    assert "if (caller != 0x227484 && caller != 0x22758E) return got;" in hook
-    assert "(g_debug && !HookAt(kGroundRayRva, &GroundRayHook, g_groundRay))" in source
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
     real = tick.index("g_realFrom = g_notes.load();")
@@ -885,40 +880,21 @@ def test_a_spot_that_dropped_her_is_skipped_on_the_next_load_and_save_waits():
     assert "g_lostLanding = false;" in arm
 
 
-def test_the_ground_watch_is_debug_only_and_never_reads_freed_memory():
+def test_the_layers_under_her_are_surveyed_at_each_debug_pause_and_nothing_hooks_threads():
     """
-    the hardware watch that hunts the engine's ground check only runs with
-    Debug=1, comes off on a field change before the actor goes, and the
-    handler only copies into a ring for Tick to log
+    layer 11, the one the controller's ray uses, came back empty under every
+    floor (0.25.18), so with Debug on each pause logs what the same ray finds
+    under her on every layer, to map against which spots load and which drop
+    her. The hardware watch that found the ray is gone: setting debug
+    registers on every thread is no thing to leave in
     """
     source = SOURCE.read_text(encoding="utf-8")
-    tick = source[source.index("void TickWatch(int state) {"):]
+    assert "SetThreadContext" not in source and "AddVectoredExceptionHandler" not in source
+    survey = source[source.index("void SurveyLayers(const Vec4& at) {"):]
+    survey = survey[:survey.index("\n}\n")]
+    assert "bit < 0 ? -1 : 1 << bit" in survey
+    tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
-    assert tick.startswith("void TickWatch(int state) {\n    if (!g_debug) return;")
-    assert "if (state == 1 || state == 2) {\n        if (g_watchFlags) SetWatch(nullptr, nullptr);" in tick
-    handler = source[source.index("LONG CALLBACK WatchHandler("):]
-    handler = handler[:handler.index("\n}\n")]
-    assert "Log(" not in handler and "return EXCEPTION_CONTINUE_SEARCH;" in handler
-    arm = source[source.index("void SetWatch("):]
-    arm = arm[:arm.index("\n}\n")]
-    assert arm.index("g_watchFlags = nullptr;") < arm.index("g_watchFlags = flags;")
-
-
-def test_save_asks_the_engines_own_ground_ray_what_a_load_would_land_on():
-    """
-    the Ch 9 lift's apron holds her while she walks on it and drops her through
-    on every load, even with the lift back before she spawns (0.25.17, Nov 23).
-    The player controller (0x626240) sets her down after a spawn with a ray on
-    collision layer 11 (0x45B000), and the apron isn't on it. So the last thing
-    Save asks is that same ray, from just above her feet: no hit, or a hit more
-    than half a metre off where she stands, and there's no Save there
-    """
-    source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr DWORD kGroundRayRva = 0x5B000, kGroundWorldRva = 0x23FCEB4;" in source
-    assert "constexpr int kGroundLayers = 1 << 11;" in source
-    assert "{kGroundRayRva, kGroundRayHead, sizeof kGroundRayHead}," in source
-    withheld = source[source.index("const char* Withheld() {"):]
-    withheld = withheld[:withheld.index("\n}\n")]
-    carried = withheld.index("if (Carried())")
-    ray = withheld.index("!GroundUnder(at, ground) || std::fabs(ground - at.v[1]) > 0.5f")
-    assert carried < ray
+    dump = tick.index("DumpActor();")
+    assert "SurveyLayers(at);" in tick[dump:dump + 200]
+    assert tick.rfind("if (g_debug) {", 0, dump) > 0

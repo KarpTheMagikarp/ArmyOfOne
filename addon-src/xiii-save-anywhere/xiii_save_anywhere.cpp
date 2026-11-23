@@ -30,7 +30,6 @@
 // the add-on stays out of the way.
 
 #include <windows.h>
-#include <tlhelp32.h>
 
 #include <MinHook.h>
 #include <novafix/plugin_api.h>
@@ -115,14 +114,11 @@ constexpr DWORD kLockRva = 0x09D1A0, kUnlockRva = 0x09D220;  // thiscall(tag), t
 constexpr unsigned char kLockHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x14, 0x89, 0x4D, 0xEC, 0x83, 0x7D, 0x08};
 constexpr unsigned char kUnlockHead[] = {0x55, 0x8B, 0xEC, 0x51, 0x89, 0x4D, 0xFC, 0x8B, 0x45, 0xFC, 0x83, 0x78};
 constexpr DWORD kActorMatrix = 0x78, kActorTranslation = 0xA8;
-// the ray the player controller (0x626240) casts to set her on the floor
-// after a spawn, on collision layer 11: thiscall(world, from, to, hit, layers).
-// The Ch 9 lift's apron isn't on that layer. Walking onto it she's held by her
-// contacts, but a load drops her through to whatever the ray does find, and
-// no move after the spawn takes (Nov 23)
+// a collision ray the player controller (0x626240) casts along her facing on
+// layer 11: thiscall(world, from, to, hit, layers). Not its ground check after
+// all (Nov 23), but the same world, so it says what's under her on any layer
 constexpr DWORD kGroundRayRva = 0x5B000, kGroundWorldRva = 0x23FCEB4;
 constexpr unsigned char kGroundRayHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x10, 0x89, 0x4D, 0xF4, 0x51, 0x89, 0x65};
-constexpr int kGroundLayers = 1 << 11;
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
 constexpr DWORD kZoneLoadRva = 0x7EB3A4;        // mov ecx, [zone] in Zone's trigger native
@@ -1392,160 +1388,6 @@ void DumpActor() {
         g_idleSolid, footing.ground.v[0], footing.ground.v[1], footing.ground.v[2]);
 }
 
-// Debug only: hardware write watches on the leader's floor flag and her
-// height. A load onto the Ch 9 apron gets snapped 12 m down in one frame and
-// walking onto it never does, so the code that flips the flag or moves her
-// that far is the engine's ground check, the thing a save would have to ask
-// whether a load could stand her here (Nov 23). The handler only copies the
-// hit into a ring; Tick logs it
-struct WatchHit {
-    int kind;  // 0 the floor flag flipped, 1 her height jumped
-    DWORD eip;
-    DWORD value;
-    float before, after;
-    DWORD stack[14];
-};
-constexpr int kWatchRing = 64;
-WatchHit g_watchRing[kWatchRing];
-std::atomic<int> g_watchHead{0};
-int g_watchTail = 0;
-DWORD* volatile g_watchFlags = nullptr;
-float* volatile g_watchY = nullptr;
-DWORD g_watchLastFlags = 0;
-float g_watchLastY = 0;
-PVOID g_watchHandler = nullptr;
-int g_watchLines = 0;
-
-void Capture(const CONTEXT* c, int kind, DWORD value, float before, float after) {
-    const int at = g_watchHead.load();
-    if (at - g_watchTail >= kWatchRing) return;
-    WatchHit& hit = g_watchRing[at % kWatchRing];
-    hit = {kind, static_cast<DWORD>(c->Eip - g_base), value, before, after, {}};
-    // return addresses the cheap way: anything on the stack that points into the exe's code
-    static DWORD stack[256];
-    const size_t got = Readable(reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(c->Esp)),
-                                reinterpret_cast<unsigned char*>(stack), sizeof stack) / 4;
-    int found = 0;
-    for (size_t i = 0; i < got && found < 14; ++i)
-        if (stack[i] > g_base + 0x1000 && stack[i] < g_base + 0xC00000) hit.stack[found++] = stack[i] - g_base;
-    g_watchHead = at + 1;
-}
-
-LONG CALLBACK WatchHandler(EXCEPTION_POINTERS* info) {
-    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
-    CONTEXT* c = info->ContextRecord;
-    if (!(c->Dr6 & 3)) return EXCEPTION_CONTINUE_SEARCH;
-    DWORD* flags = g_watchFlags;
-    float* y = g_watchY;
-    if ((c->Dr6 & 1) && flags) {
-        const DWORD now = *flags;
-        if ((now ^ g_watchLastFlags) & kOnLevelFloor) Capture(c, 0, now, 0, 0);
-        g_watchLastFlags = now;
-    }
-    if ((c->Dr6 & 2) && y) {
-        const float now = *y;
-        if (std::fabs(now - g_watchLastY) > 1.5f) Capture(c, 1, 0, g_watchLastY, now);
-        g_watchLastY = now;
-    }
-    c->Dr6 = 0;
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-
-// a thread can't reliably set its own debug registers, and the writes may
-// come from a worker, so a helper sets them on every thread there is, one
-// suspended at a time. Nothing allocates while one's held
-DWORD WINAPI ArmWatch(LPVOID) {
-    const DWORD self = GetCurrentThreadId(), pid = GetCurrentProcessId();
-    const auto flags = reinterpret_cast<std::uintptr_t>(g_watchFlags);
-    const auto y = reinterpret_cast<std::uintptr_t>(g_watchY);
-    const DWORD dr7 = flags ? 1u | 4u | (1u << 16) | (3u << 18) | (1u << 20) | (3u << 22) : 0;
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-    THREADENTRY32 entry{};
-    entry.dwSize = sizeof entry;
-    for (BOOL more = Thread32First(snap, &entry); more; more = Thread32Next(snap, &entry)) {
-        if (entry.th32OwnerProcessID != pid || entry.th32ThreadID == self) continue;
-        HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE,
-                                   entry.th32ThreadID);
-        if (!thread) continue;
-        if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
-            CONTEXT c{};
-            c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-            if (GetThreadContext(thread, &c)) {
-                c.Dr0 = static_cast<DWORD>(flags);
-                c.Dr1 = static_cast<DWORD>(y);
-                c.Dr6 = 0;
-                c.Dr7 = dr7;
-                SetThreadContext(thread, &c);
-            }
-            ResumeThread(thread);
-        }
-        CloseHandle(thread);
-    }
-    CloseHandle(snap);
-    return 0;
-}
-
-void SetWatch(DWORD* flags, float* y) {
-    if (flags == g_watchFlags && y == g_watchY) return;
-    // off first, so a hit on the old addresses never reads freed memory
-    g_watchFlags = nullptr;
-    g_watchY = nullptr;
-    if (flags) {
-        g_watchLastFlags = *flags;
-        g_watchLastY = *y;
-    }
-    g_watchFlags = flags;
-    g_watchY = y;
-    if (!g_watchHandler) g_watchHandler = AddVectoredExceptionHandler(1, WatchHandler);
-    if (HANDLE helper = CreateThread(nullptr, 0, ArmWatch, nullptr, 0, nullptr)) {
-        WaitForSingleObject(helper, 2000);
-        CloseHandle(helper);
-    }
-    if (flags) Log("  watch: floor flag at %p, height at %p", static_cast<void*>(flags), static_cast<void*>(y));
-}
-
-// the leader's flag and height, armed in free roam and moved when she is
-void TickWatch(int state) {
-    if (!g_debug) return;
-    if (state == 1 || state == 2) {
-        if (g_watchFlags) SetWatch(nullptr, nullptr);
-    } else if (state == kStateFieldIdle && PlayerHandle() != 0xFFFFFFFF) {
-        unsigned char* registry = *g_actorRegistry;
-        unsigned char* actor = nullptr;
-        unsigned char* holder = nullptr;
-        if (registry) {
-            g_lock(registry + 0x6C0, nullptr, nullptr);
-            actor = g_resolveActor(registry, nullptr, static_cast<int>(PlayerHandle()));
-            if (actor && Readable(actor + kActorFooting, reinterpret_cast<unsigned char*>(&holder), sizeof holder) !=
-                             sizeof holder)
-                holder = nullptr;
-            g_unlock(registry + 0x6C0, nullptr);
-        }
-        if (actor && holder)
-            SetWatch(reinterpret_cast<DWORD*>(holder + kFootingFlags),
-                     reinterpret_cast<float*>(actor + kActorTranslation + 4));
-    }
-    // the flag flips with every jump, so each writer only gets a few lines
-    static std::map<unsigned long long, int> seen;
-    for (; g_watchTail < g_watchHead.load() && g_watchLines < 200; ++g_watchTail) {
-        const WatchHit& hit = g_watchRing[g_watchTail % kWatchRing];
-        const unsigned long long key =
-            (static_cast<unsigned long long>(hit.eip) << 2) | (hit.kind << 1) | ((hit.value & kOnLevelFloor) != 0);
-        if (hit.kind == 0 && ++seen[key] > 3) continue;
-        ++g_watchLines;
-        char stack[160] = "";
-        for (int i = 0, n = 0; i < 14 && hit.stack[i]; ++i)
-            n += std::snprintf(stack + n, sizeof stack - n, " %x", static_cast<unsigned>(hit.stack[i]));
-        if (hit.kind == 0)
-            Log("  watch: floor flag %s (%08lx) by %x, stack%s", (hit.value & kOnLevelFloor) ? "on" : "off",
-                hit.value, static_cast<unsigned>(hit.eip), stack);
-        else
-            Log("  watch: height %.2f to %.2f by %x, stack%s", hit.before, hit.after, static_cast<unsigned>(hit.eip),
-                stack);
-    }
-}
-
 // the spot as the spawn should get it: upright, since the live matrix leans
 // on slopes and lifts and a leaned start marker leaves the leader standing
 // at that angle, and a step ahead of the spot so the spawn's own step back
@@ -1868,51 +1710,30 @@ bool CanSave() {
     return g_findSavePointRow() != nullptr && PlayerHandle() != 0xFFFFFFFF;
 }
 
-// Debug only: what the player controller's own ground rays (two call sites
-// in 0x626240) ask and get, to pin down why ours always came back empty and
-// why a load onto plain walkway near the Ch 9 lift went through once the lift
-// was back before the spawn (0.25.17/18, Nov 23). First 40 after each load,
-// then one in 60, 300 lines in all
-GroundRayFn g_groundRay = nullptr;
-ULONGLONG g_rayBurstUntil = 0;
-int g_rayLines = 0, g_rayBurst = 0, g_raySkip = 0;
-
-int __fastcall GroundRayHook(void* world, void* edx, const float* from, const float* to, float* hit, int layers) {
-    const int got = g_groundRay(world, edx, from, to, hit, layers);
-    const DWORD caller = static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(__builtin_return_address(0)) - g_base);
-    if (caller != 0x227484 && caller != 0x22758E) return got;
-    const bool burst = g_rayBurst > 0 && GetTickCount64() < g_rayBurstUntil;
-    if (g_rayLines >= 300 || (!burst && ++g_raySkip % 60)) return got;
-    if (burst) --g_rayBurst;
-    ++g_rayLines;
-    Log("  their ray %x: %p %.2f %.2f %.2f to %.2f %.2f %.2f w %.2f/%.2f, layers %x: %s %.2f %.2f %.2f / %.2f %.2f %.2f",
-        static_cast<unsigned>(caller), world, from[0], from[1], from[2], to[0], to[1], to[2], from[3], to[3],
-        static_cast<unsigned>(layers), (got & 0xFF) ? "hit" : "nothing", hit[1], hit[2], hit[3], hit[5], hit[6],
-        hit[7]);
-    return got;
-}
-
-// the floor a load would set her on: the engine's own ray from half a metre
-// above her feet to 2 m under them. Its hit block has a point and a normal and
-// which is which isn't pinned yet, so the one under her is the point
-bool GroundUnder(const Vec4& at, float& y) {
+// Debug only, at each pause: which collision layers the engine's ray finds
+// under her, one bit at a time. Layer 11, the one the controller casts on,
+// came back empty under every floor, deck included (0.25.18, Nov 23), so the
+// layers floors are on, and the one the Ch 9 apron is or isn't on, get
+// mapped against which spots load and which drop her before Save leans on any
+void SurveyLayers(const Vec4& at) {
     void* world = *reinterpret_cast<void**>(g_base + kGroundWorldRva);
-    if (!world) return false;
-    if (g_debug) Log("  our ray: %p", world);
-    alignas(16) float from[4] = {at.v[0], at.v[1] + 0.5f, at.v[2], 1.0f};
-    alignas(16) float to[4] = {at.v[0], at.v[1] - 2.0f, at.v[2], 1.0f};
-    alignas(16) float hit[16]{};
-    const int got = reinterpret_cast<GroundRayFn>(g_base + kGroundRayRva)(world, nullptr, from, to, hit, kGroundLayers);
-    if (g_debug)
-        Log("  ground ray from %.2f: %s, %.2f %.2f %.2f / %.2f %.2f %.2f", at.v[1], (got & 0xFF) ? "hit" : "nothing",
-            hit[1], hit[2], hit[3], hit[5], hit[6], hit[7]);
-    if (!(got & 0xFF)) return false;
-    for (int k : {1, 5})
-        if (std::fabs(hit[k] - at.v[0]) < 0.5f && std::fabs(hit[k + 2] - at.v[2]) < 0.5f && std::isfinite(hit[k + 1])) {
-            y = hit[k + 1];
-            return true;
-        }
-    return false;
+    if (!world) return;
+    alignas(16) const float from[4] = {at.v[0], at.v[1] + 0.5f, at.v[2], 1.0f};
+    alignas(16) const float to[4] = {at.v[0], at.v[1] - 3.0f, at.v[2], 1.0f};
+    const auto ray = reinterpret_cast<GroundRayFn>(g_base + kGroundRayRva);
+    char line[512];
+    int n = std::snprintf(line, sizeof line, "  layers under her at %.2f %.2f %.2f:", at.v[0], at.v[1], at.v[2]);
+    for (int bit = -1; bit < 32 && n < static_cast<int>(sizeof line) - 24; ++bit) {
+        alignas(16) float hit[16]{};
+        if (!(ray(world, nullptr, from, to, hit, bit < 0 ? -1 : 1 << bit) & 0xFF)) continue;
+        // a point and a normal come back and which is which isn't pinned: the one under her
+        float y = NAN;
+        for (int k : {1, 5})
+            if (std::fabs(hit[k] - at.v[0]) < 0.5f && std::fabs(hit[k + 2] - at.v[2]) < 0.5f) y = hit[k + 1];
+        n += bit < 0 ? std::snprintf(line + n, sizeof line - n, " all %.2f", y)
+                     : std::snprintf(line + n, sizeof line - n, " %d %.2f", bit, y);
+    }
+    Log("%s", line);
 }
 
 // whether Save goes on the bar, and why not when it doesn't
@@ -1958,13 +1779,6 @@ const char* Withheld() {
     float rise = 0;
     if (!Steady(rise)) return "you were going up or down (a lift, a fall or a jump)";
     if (Carried()) return "something was carrying you (a moving platform)";
-    // last, being a call into the engine: what a load would land her on has
-    // to be what she's standing on
-    Vec4 at{};
-    float ground = 0;
-    if (!Position(PlayerHandle(), at) || !GroundUnder(at, ground) || std::fabs(ground - at.v[1]) > 0.5f)
-        return "the floor here only holds her while she walks on it (a moving part, like a lift's apron), a load "
-               "would drop her through";
     return nullptr;
 }
 
@@ -2482,7 +2296,6 @@ void Tick() {
         // a field change after the point means it's not this field's any more
         g_restartPoint = false;
     }
-    TickWatch(state);
     const Sample& prev = g_track[(g_trackNext + 15) % 16];
     if (state == kStateFieldIdle && now - prev.at >= 40) {
         Matrix m{};
@@ -2669,8 +2482,6 @@ void Tick() {
             // fight on the floor below. 2.5 s in she'd already dropped 11 m
             if (g_landCheckAt) g_landCheckAt = now;
             g_heightTraceUntil = g_debug ? now + 4000 : 0;
-            g_rayBurstUntil = now + 8000;
-            g_rayBurst = 40;
         }
     }
     if (g_heightTraceUntil && now < g_heightTraceUntil && now - g_heightTraceAt >= 250 && state == kStateFieldIdle) {
@@ -2693,6 +2504,8 @@ void Tick() {
             ReadProgress(pausedAt);
             LogProgress("paused", pausedAt);
             DumpActor();
+            Vec4 at{};
+            if (Position(PlayerHandle(), at)) SurveyLayers(at);
         }
     }
 
@@ -3058,7 +2871,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.19, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.20, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3080,7 +2893,7 @@ DWORD WINAPI Worker(LPVOID) {
               reinterpret_cast<LPVOID*>(&g_pauseMode)) ||
         !Hook(reinterpret_cast<LPVOID>(g_base + kTextSetIdRva), reinterpret_cast<LPVOID>(&TextSetIdHook),
               reinterpret_cast<LPVOID*>(&g_textSetId)) ||
-        !HookWorld() || (g_debug && !HookAt(kGroundRayRva, &GroundRayHook, g_groundRay))) {
+        !HookWorld()) {
         // all or nothing: the input side without the save hooks would keep
         // spots it can never match to a slot
         MH_DisableHook(MH_ALL_HOOKS);
@@ -3098,7 +2911,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.19";
+    d.version = "0.25.20";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
