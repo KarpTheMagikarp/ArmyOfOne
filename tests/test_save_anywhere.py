@@ -893,3 +893,22 @@ def test_a_fallback_skips_the_piece_that_failed_and_a_lost_landing_holds_save():
     withheld = withheld[:withheld.index("\n}\n")]
     assert withheld.index("if (g_lostLanding)") < withheld.index("g_sanctioned.story < 0")
     assert "g_lostLanding = false;" in source[source.index("void Sanctify("):]
+
+
+def test_the_ground_watch_is_debug_only_and_never_reads_freed_memory():
+    """
+    the hardware watch that hunts the engine's ground check only runs with
+    Debug=1, comes off on a field change before the actor goes, and the
+    handler only copies into a ring for Tick to log
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void TickWatch(int state) {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert tick.startswith("void TickWatch(int state) {\n    if (!g_debug) return;")
+    assert "if (state == 1 || state == 2) {\n        if (g_watchFlags) SetWatch(nullptr, nullptr);" in tick
+    handler = source[source.index("LONG CALLBACK WatchHandler("):]
+    handler = handler[:handler.index("\n}\n")]
+    assert "Log(" not in handler and "return EXCEPTION_CONTINUE_SEARCH;" in handler
+    arm = source[source.index("void SetWatch("):]
+    arm = arm[:arm.index("\n}\n")]
+    assert arm.index("g_watchFlags = nullptr;") < arm.index("g_watchFlags = flags;")
