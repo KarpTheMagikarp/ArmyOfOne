@@ -963,3 +963,25 @@ def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     # changed across the trace
     assert "constexpr DWORD kFieldPlayerRva = 0x23FF554;" in source
     assert 'Log("  controller through the trace: %d of %u dwords changed"' in source
+
+
+def test_a_load_of_ours_holds_the_controllers_ease_in():
+    """
+    a load sets the leader 4.06 m off the start marker and the field
+    controller eases her in to 2.25 m, which is walking up to the terminal
+    on a station's load and a 1.75 m slide off the spot on ours. Ours moves
+    the anchor to 2.25 m off the spot on the same line and takes the
+    distance as eased, once the anchor's filled in, and only on its own loads
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr size_t kArrivalAnchor = 0x8C, kArrivalAnchorToo = 0xAC, kArrivalTo = 0x26C, kArrivalAt = 0x34C;" in source
+    arm = source[source.index("void TryArm(int marker) {"):]
+    arm = arm[:arm.index("\n}\n")]
+    assert "g_holdArrivalUntil = GetTickCount64() + 45000;" in arm
+    hold = source[source.index("void HoldArrival(int state) {"):]
+    hold = hold[:hold.index("\n}\n")]
+    assert "if (std::fabs(at - to) < 0.01f || to < 0.5f || to > 10.0f) return;" in hold
+    assert "if (len < 1.0f || len > 8.0f) return;" in hold
+    assert "g_landTarget.v[0] - to * dx" in hold and "g_landTarget.v[2] - to * dz" in hold
+    assert hold.index("std::memcpy(ctrl + kArrivalAnchor") < hold.index("std::memcpy(ctrl + kArrivalAt")
+    assert "if (g_holdArrivalUntil) HoldArrival(state);" in source

@@ -137,6 +137,13 @@ constexpr DWORD kSetMatrixRva = 0x3C1970;
 // path that moves her with no stick, which is the one under suspicion
 constexpr DWORD kFieldPlayerRva = 0x23FF554;
 constexpr size_t kFieldPlayerFlags = 0x154, kFieldPlayerSpan = 0x600;
+// a load sets the leader down 4.06 m off the start marker and that
+// controller eases her in to 2.25 m: walking up to the terminal, on a
+// station's own load. She's held on the line out from its anchor at the
+// eased distance, which is the anchor at +0x8C (and again at +0xAC), the
+// distance it's easing to at +0x26C and where it's got to at +0x34C. Read
+// off a station load and one of ours, Ch 7, Nov 23
+constexpr size_t kArrivalAnchor = 0x8C, kArrivalAnchorToo = 0xAC, kArrivalTo = 0x26C, kArrivalAt = 0x34C;
 constexpr unsigned char kSetMatrixHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x89, 0x4D, 0xB4};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
@@ -757,6 +764,8 @@ std::atomic<bool> g_fieldAnimates{false};
 std::atomic<void*> g_watchActor{nullptr};
 std::atomic<ULONGLONG> g_watchUntil{0};
 std::atomic<int> g_watchLines{0};
+// a load of ours is up and the controller's ease-in hasn't been dealt with
+ULONGLONG g_holdArrivalUntil = 0;
 // the controller as it was when the trace started, to diff at its end
 unsigned char g_ctrlStart[kFieldPlayerSpan];
 size_t g_ctrlGot = 0;
@@ -2064,6 +2073,7 @@ void TryArm(int marker) {
         g_landCheckAt = GetTickCount64() + 2500;
         g_landGiveUp = GetTickCount64() + 15000;
         g_landSeenAt = 0;
+        g_holdArrivalUntil = GetTickCount64() + 45000;
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
         Log("slot %d: start marker %d answers with %.2f %.2f %.2f, %u things to check the field for once it's up",
@@ -2153,6 +2163,47 @@ void Sanctify(const char* where, bool baseline = true) {
 // marked so the next load starts somewhere she walked, and Save stays off.
 // Right after a load the handle points at a stand-in for a few seconds, so
 // only reads by the target count
+// ours has no terminal to walk up to, so the ease-in carried her 1.75 m on
+// along her heading every load. The anchor goes to 2.25 m off the spot on
+// the same line and the distance is taken as already eased: the end state a
+// station load gets to, without her sliding there
+void HoldArrival(int state) {
+    const ULONGLONG now = GetTickCount64();
+    if (now > g_holdArrivalUntil) {
+        g_holdArrivalUntil = 0;
+        Log("no ease-in after the load, nothing to hold");
+        return;
+    }
+    if (state != kStateFieldIdle) return;
+    auto* ctrl = *reinterpret_cast<unsigned char**>(g_base + kFieldPlayerRva);
+    if (!ctrl) return;
+    float anchor[3], to = 0, at = 0;
+    if (Readable(ctrl + kArrivalAnchor, reinterpret_cast<unsigned char*>(anchor), sizeof anchor) != sizeof anchor ||
+        Readable(ctrl + kArrivalTo, reinterpret_cast<unsigned char*>(&to), sizeof to) != sizeof to ||
+        Readable(ctrl + kArrivalAt, reinterpret_cast<unsigned char*>(&at), sizeof at) != sizeof at)
+        return;
+    if (!std::isfinite(to) || !std::isfinite(at) || !std::isfinite(anchor[0]) || !std::isfinite(anchor[2])) return;
+    // not easing yet
+    if (std::fabs(at - to) < 0.01f || to < 0.5f || to > 10.0f) return;
+    Vec4 her{};
+    if (!Position(PlayerHandle(), her) || StandIn(her)) return;
+    float dx = her.v[0] - anchor[0], dz = her.v[2] - anchor[2];
+    // the anchor's zero till the controller fills it, and one put back after
+    // ours went in would undo it with the distance already eased: a jump
+    const float len = std::hypot(dx, dz);
+    if (len < 1.0f || len > 8.0f) return;
+    dx /= len;
+    dz /= len;
+    // through the spot, not where she is: she can be a frame or two into it
+    const float moved[3] = {g_landTarget.v[0] - to * dx, anchor[1], g_landTarget.v[2] - to * dz};
+    std::memcpy(ctrl + kArrivalAnchor, moved, sizeof moved);
+    std::memcpy(ctrl + kArrivalAnchorToo, moved, sizeof moved);
+    std::memcpy(ctrl + kArrivalAt, &to, sizeof to);
+    g_holdArrivalUntil = 0;
+    Log("held the ease-in: anchor %.2f %.2f moved to %.2f %.2f, %.2f m she'd have slid", anchor[0], anchor[2],
+        moved[0], moved[2], at - to);
+}
+
 void TickLoad(int state) {
     if (!g_landCheckAt || state != kStateFieldIdle || GetTickCount64() < g_landCheckAt) return;
     const ULONGLONG now = GetTickCount64();
@@ -2684,6 +2735,7 @@ void Tick() {
         }
     }
     TickSave(state);
+    if (g_holdArrivalUntil) HoldArrival(state);
     if (g_phase == Phase::Idle && g_enabled) TickLoad(state);
     g_lastState = state;
 }
@@ -3031,7 +3083,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.28, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.29, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3077,7 +3129,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.28";
+    d.version = "0.25.29";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
