@@ -1508,7 +1508,8 @@ void DumpActor() {
 // at that angle, and a step ahead of the spot so the spawn's own step back
 // lands on it. A matrix with no heading left in it keeps the station's. With
 // a walk in on file she faces along it and the marker goes kEaseInTo ahead,
-// at the higher of the two heights so the start's never inside the ground
+// and the height is the walk in's where she'll start: on a slope the spot's
+// own would put her in the ground walking down to it and drop her walking up
 Matrix SpawnMatrix(const Matrix& saved, const float* station, bool approach = false, const Vec4& from = {}) {
     Matrix out = saved;
     float fx = saved.m[8], fz = saved.m[10];
@@ -1517,7 +1518,9 @@ Matrix SpawnMatrix(const Matrix& saved, const float* station, bool approach = fa
         fx = saved.m[12] - from.v[0];
         fz = saved.m[14] - from.v[2];
         step = kEaseInTo;
-        y = std::max(y, from.v[1]);
+        const float d = std::max(std::hypot(fx, fz), 1e-3f);
+        const float t = std::clamp((d - (kEaseInFrom - kEaseInTo)) / d, 0.0f, 1.0f);
+        y = from.v[1] + t * (saved.m[13] - from.v[1]);
     }
     float len = std::hypot(fx, fz);
     if (len < 0.2f) {
@@ -3131,7 +3134,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.32, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.33, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3177,7 +3180,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.32";
+    d.version = "0.25.33";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

@@ -995,7 +995,8 @@ def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on
     assert "version >= 3 && version <= 7" in source
     spawn = source[source.index("Matrix SpawnMatrix("):]
     spawn = spawn[:spawn.index("\n}\n")]
-    assert "step = kEaseInTo;" in spawn and "y = std::max(y, from.v[1]);" in spawn
+    # height taken off the walk in where she starts, not the spot's
+    assert "step = kEaseInTo;" in spawn and "y = from.v[1] + t * (saved.m[13] - from.v[1]);" in spawn
     assert "out.m[13] = y - kSpawnRise;" in spawn
     # a spot AvoidLostSpots moved isn't the one she walked in to
     arm = source[source.index("void TryArm(int marker) {"):]
