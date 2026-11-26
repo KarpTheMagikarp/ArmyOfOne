@@ -6,14 +6,13 @@ XIII-2 and Lightning Returns) on Steam.**
 [![Downloads](https://img.shields.io/github/downloads/KarpTheMagikarp/ArmyOfOne/total)](../../releases)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-<!-- demo video or GIF goes here, above the screenshot -->
+<!-- demo GIF goes here, linking to the full video -->
 
-The Final Fantasy XIII trilogy on Steam needs a pile of community fixes before
-it runs the way it should, and setting them up usually means an evening of
-guides, file copying and batch scripts. ArmyOfOne does all of it in one click,
-from a menu built to look and feel like XIII's own.
-
-![menu](assets/art_xiii.png)
+The Final Fantasy XIII trilogy on Steam unfortunately needs a pile of community
+fixes before it runs the way it should, and setting them up usually means an
+evening of guides, file copying and batch scripts. I wanted to fix this so it's
+easier to get the games up and running, for newcomers and for anyone who just
+wants to come back without the hassle. Enjoy!
 
 ## What you get
 
