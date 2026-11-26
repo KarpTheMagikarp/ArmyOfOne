@@ -1553,10 +1553,14 @@ void DumpActor() {
 
 // the spot as the spawn should get it: upright, since the live matrix leans
 // on slopes and lifts and a leaned start marker leaves the leader standing
-// at that angle, and kEaseInTo ahead along the line she walked in on, at the
-// height she walked where she'll start. With no walk in on file it's along
-// her heading and level with the spot, which is the walk the ease-in gets
-// held to. A matrix with no heading left in it keeps the station's
+// at that angle, and kEaseInTo ahead along the line she walked in on. With
+// no walk in on file it's along her heading, and the walk the ease-in gets
+// held to is level with the spot. A matrix with no heading left in it keeps
+// the station's. Level with the spot either way, not the height she'll
+// start at: the marker is what the controller settles her toward once the
+// ease-in's done, and one at the bottom of a wave she'd walked up sank her
+// 1.2 m into it the moment the hold let go (0.25.37, Nov 26). The level
+// ones landed dead on
 Matrix SpawnMatrix(const Matrix& saved, const float* station, Walk& walk) {
     Matrix out = saved;
     const Vec4 spot = Translation(saved.m);
@@ -1581,7 +1585,7 @@ Matrix SpawnMatrix(const Matrix& saved, const float* station, Walk& walk) {
     const float rows[12] = {fz, 0, -fx, 0, 0, 1, 0, 0, fx, 0, fz, 0};
     std::memcpy(out.m, rows, sizeof rows);
     out.m[12] = spot.v[0] + kEaseInTo * fx;
-    out.m[13] = WalkHeight(walk, spot.v[0] - kEaseInRun * fx, spot.v[2] - kEaseInRun * fz) - kSpawnRise;
+    out.m[13] = spot.v[1] - kSpawnRise;
     out.m[14] = spot.v[2] + kEaseInTo * fz;
     return out;
 }
@@ -2270,7 +2274,9 @@ int __fastcall MarkerLookupHook(void* manager, void* edx, int marker, float* out
         g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0, g_spawn.walk);
         g_holdWalk = g_spawn.walk;
         const float* m = g_spawn.matrix.m;
-        g_seedFrom = {{m[12] - kEaseInFrom * m[8], m[13] + kSpawnRise, m[14] - kEaseInFrom * m[10], 1.0f}};
+        const float x = m[12] - kEaseInFrom * m[8], z = m[14] - kEaseInFrom * m[10];
+        // the height the hold starts her at, not the marker's
+        g_seedFrom = {{x, WalkHeight(g_holdWalk, x, z), z, 1.0f}};
         g_seedPath = true;
     }
     float delta[3];
@@ -3308,7 +3314,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.37, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.38, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3354,7 +3360,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.37";
+    d.version = "0.25.38";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

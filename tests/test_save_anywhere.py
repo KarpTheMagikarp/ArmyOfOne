@@ -1006,7 +1006,11 @@ def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on
     spawn = spawn[:spawn.index("\n}\n")]
     assert "walk.at[0] = {{spot.v[0] - kEaseInRun * fx, spot.v[1], spot.v[2] - kEaseInRun * fz, 1.0f}};" in spawn
     assert "out.m[12] = spot.v[0] + kEaseInTo * fx;" in spawn
-    assert "out.m[13] = WalkHeight(walk, spot.v[0] - kEaseInRun * fx, spot.v[2] - kEaseInRun * fz) - kSpawnRise;" in spawn
+    # the marker level with the spot, since it's where the controller settles
+    # her after the ease-in: one at the bottom of a wave she'd walked up sank
+    # her 1.2 m into it (0.25.37, Nov 26)
+    assert "out.m[13] = spot.v[1] - kSpawnRise;" in spawn
+    assert "WalkHeight(" not in spawn
     # and a load seeds the next path with where it set her down
     hook = source[source.index("int __fastcall MarkerLookupHook("):]
     hook = hook[:hook.index("\n}\n")]
