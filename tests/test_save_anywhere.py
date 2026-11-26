@@ -287,56 +287,75 @@ def test_a_load_of_ours_lands_through_the_spawn_alone_and_still_checks_for_a_fal
     """
     the spawn sets the leader a step behind the start marker, so ours answers
     a step ahead of the spot, upright. A move after the spawn got pulled back
-    toward where the spawn had put you, so there isn't one any more
+    toward where the spawn had put you, so there isn't one any more. Nothing
+    else moves her either: her body wrote back every move tried after the
+    spawn (Ch 9, Nov 23)
     """
     source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr float kSpawnStep = 4.0f;" in source
-    assert "g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0);" in source
+    assert "constexpr float kEaseInTo = 2.25f, kEaseInFrom = 4.0625f, kEaseInRun = kEaseInFrom - kEaseInTo;" in source
+    # the spawn lifts her 1.45 off the marker, so ours answers that much under
+    # the floor she stood on, less 5 cm, the way a station's marker sits
+    assert "constexpr float kSpawnRise = 1.40f;" in source
+    assert "kSpawnStep" not in source
+    assert "g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0, g_spawn.walk);" in source
+    assert "SetPos" not in source and "0x2C3450" not in source
     body = source[source.index("void TickLoad(int state) {"):]
     body = body[:body.index("\n}\n")]
-    # the spot's never moved onto after the spawn: only a fallback moves you
-    assert "NextFallback(" in body
+    assert "LoseSpot(" in body
 
 
-def test_it_only_saves_a_story_state_a_station_could_have():
+def test_after_a_story_beat_it_saves_only_what_a_load_can_put_back():
     """
     a save mid-sequence (after a beat, before the station that follows it)
-    reloaded into a fight that never led anywhere. So Save stays off the bar
-    once the story's moved past where the last load or station save had it
+    reloaded into a fight that never led anywhere, so for a while Save waited
+    for the next station after any beat. With the world journal a load puts
+    back what the station's rebuild misses (every difference a terminal's own
+    reload left in Vile Peaks was one of those, Nov 15), so after a beat it's
+    only held back by what can't be put back yet: a chara made or let go, a
+    talk change, a path edge, or a zone flag
     """
     source = SOURCE.read_text(encoding="utf-8")
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
-    assert "Moved(now)" in withheld and "Steady(rise)" in withheld
-    # a scene since the last station is what holds it back first
-    assert withheld.index("g_sceneSince >= 0") < withheld.index("Moved(now)")
-    moved = source[source.index("const char* Moved(const Progress& now) {"):]
-    moved = moved[:moved.index("\n}\n")]
-    for check in ("now.story != g_sanctioned.story", "now.ui != g_sanctioned.ui", "now.menu, g_sanctioned.menu"):
-        assert check in moved, check
-    # a chest or a jump up a ledge flips event flags, so those are logged, not gated
-    for logged in ("now.flags", "now.work", "now.zone"):
-        assert logged not in moved, logged
+    # a sequence still running holds it back whatever came before
+    assert withheld.index("now.ui != g_sanctioned.ui") < withheld.index("g_sceneSince >= 0")
+    assert "now.menu, g_sanctioned.menu" in withheld
+    beat = withheld[withheld.index("if (g_sceneSince >= 0 || now.story != g_sanctioned.story) {"):]
+    assert "CharasMoved()" in beat and "g_lockedNotes.load() != g_lockedAtSanction" in beat
+    assert "now.zone, g_sanctioned.zone" in beat
+    assert "Steady(rise)" in withheld and "Carried()" in withheld
+    note = source[source.index("void Note(Op op,"):]
+    note = note[:note.index("\n}\n")]
+    assert "if (!Replayable(op) && op != Op::Chara) ++g_lockedNotes;" in note
+    # a chara made and let go inside a scene nets out, by name
+    native = source[source.index("void NoteNative(Op op, void* vm, bool on) {"):]
+    native = native[:native.index("\n}\n")]
+    assert "const char* target = op == Op::Chara && on ? texts[1] : texts[0];" in native
     # the bar and the press go by the same answer
     assert "&& !Withheld();" in source
     assert "if (const char* why = Withheld()) Log(\"save pressed, but %s\", why);" in source
-    # station saves sanction, and only from the save screen
-    assert "if (!g_ourSave.load() && g_stateForFiles.load() == kStateSave) {\n        g_sanction = kStation;" in source
+    # station saves sanction: any slot write that isn't ours, since a terminal
+    # saves from its own menu and never passes through the save screen's state
+    hook = source[source.index("int __fastcall SaveWriteHook("):]
+    hook = hook[:hook.index("g_sanction = kStation;")]
+    assert "!g_ourSave.load() && slot >= 0 && slot < kSlots && data && size >= kSaveMinBytes" in hook
 
 
 def test_a_floor_thats_gone_on_load_is_caught_whatever_moved_it():
     """
     lifts, sideways platforms, a save in mid air: if the floor isn't where it
-    was once the field's rebuilt you drop, and a straight drop of more than a
-    step sends you to the station. Stairs cover more ground than height, so
-    walking off down them isn't a drop
+    was once the field's rebuilt she drops straight through, and the spot's
+    marked so the next load starts somewhere she walked. Stairs and a hop off
+    a step cover more ground than height, so they aren't a drop (0.25.13 read
+    one as a fall)
     """
     source = SOURCE.read_text(encoding="utf-8")
     body = source[source.index("void TickLoad(int state) {"):]
     body = body[:body.index("\n}\n")]
-    assert "if (flat < 3.0f && drop > 1.0f && flat < drop) {" in body
-    assert "NextFallback(handle, now, why);" in body
-    assert "g_rescues < 3" in body
+    drop = body.index("if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {")
+    after = body[drop:drop + 500]
+    assert "LoseSpot(g_loadedSlot, g_landTarget);" in after and "g_lostLanding = true;" in after
+    assert body.index("if (g_worldCheckWanted) return;") < drop
 
 
 def test_a_station_is_what_makes_a_state_safe_to_save_in():
@@ -356,7 +375,7 @@ def test_a_station_is_what_makes_a_state_safe_to_save_in():
     assert 'Sanctify("a station")' in tick and "state == kStateFieldIdle" in tick
     assert 'Sanctify("the station this load started at")' in tick
     assert "if (format >= 4) g_sanction = kOurs;" in source
-    assert '"xiii-save-anywhere 4\\nhash' in source
+    assert '"xiii-save-anywhere 8\\nhash' in source
     assert "g_readBytes" not in source
     # any read wipes the old state until the new field's settled
     assert "g_sanctioned.story = -1;" in tick
@@ -368,7 +387,7 @@ def test_the_guard_is_asked_again_as_the_save_fires_and_after_it():
     assert "if (const char* why = Withheld()) {" in source[fire - 400:fire]
     finish = source[source.index("void FinishSave() {"):]
     finish = finish[:finish.index("\n}\n")]
-    assert finish.index("Moved(after)") < finish.index("WriteWhere(written);")
+    assert finish.index("Drifted(after, g_atSave)") < finish.index("WriteWhere(written);")
 
 
 def test_it_never_writes_to_a_save():
@@ -384,13 +403,13 @@ def test_it_never_writes_to_a_save():
 def test_it_only_acts_in_free_roam_and_its_pause_never_in_a_fight():
     """
     the numbers are the zone state table's (0x26A1728, states from entry 60):
-    3 FIELD_IDLE, 23 FIELD_PAUSE, 27 FIELD_PAUSE_WAIT, 60 SAVE. A battle pauses
-    into 24 and an event or live event into states of their own, so none of
-    them shows Save or takes the press
+    3 FIELD_IDLE, 23 FIELD_PAUSE, 27 FIELD_PAUSE_WAIT, 31 FIELD_PAUSE_END_WAIT,
+    60 SAVE. A battle pauses into 24 and an event or live event into states of
+    their own, so none of them shows Save or takes the press
     """
     source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr int kStateFieldIdle = 3, kStateFieldPause = 23, kStateFieldPauseWait = 27, kStateSave = 60;" \
-        in source
+    assert "constexpr int kStateFieldIdle = 3, kStateFieldPause = 23, kStateFieldPauseWait = 27, kStateFieldPauseEnd = 31,\n" \
+           "              kStateSave = 60;" in source
     fire = source.index("g_zoneFire(Zone(), nullptr, kTrgSaveReq);")
     assert "if (state == kStateFieldIdle) {" in source[fire - 600:fire]
     assert "if (state == kStateFieldPause && g_phase == Phase::Idle && g_enabled && (g_decorated || !g_prompt)" \
@@ -422,8 +441,9 @@ def test_platforms_any_way_they_move_and_where_a_missing_floor_sends_you():
     """
     up and down is the lift guard. Sideways or spinning is being carried
     where she isn't facing, step by step, with the facing axis learnt from her
-    own walking rather than assumed. And if the floor's gone on load, the
-    ground she walked on just before comes first, the station last
+    own walking rather than assumed. And if the floor was gone on load, the
+    next load of that save starts on the ground she walked on before, off
+    that stretch, and the station only when there's none
     """
     source = SOURCE.read_text(encoding="utf-8")
     withheld = source[source.index("const char* Withheld() {"):]
@@ -432,13 +452,16 @@ def test_platforms_any_way_they_move_and_where_a_missing_floor_sends_you():
     carried = source[source.index("bool Carried() {"):]
     carried = carried[:carried.index("\n}\n")]
     assert "FacingAxis()" in carried and "if (axis < 0) return false;" in carried
-    fallback = source[source.index("void NextFallback("):]
-    fallback = fallback[:fallback.index("\n}\n")]
-    assert "g_fallbackAt == g_fallbackCount" in fallback and "g_stationPos" in fallback
+    avoid = source[source.index("bool AvoidLostSpots(int slot, Matrix& saved) {"):]
+    avoid = avoid[:avoid.index("\n}\n")]
+    assert "for (int i = 0; i < g_fallbackCount; ++i) {" in avoid and "return false;" in avoid
+    arm = source[source.index("void TryArm(int marker) {"):]
+    arm = arm[:arm.index("\n}\n")]
+    assert "} else if (const Vec4 spot = Translation(saved.m); !AvoidLostSpots(load.slot, saved)) {" in arm
     assert 'fprintf(file, "\\ntrail %d", g_savedTrailCount);' in source
     # a station starts a fresh trail, and a new field throws the old one away
     assert "g_trailCount = 0;" in source[source.index("void Sanctify("):]
-    assert "if (state == 1 || state == 2) g_trailCount = 0;" in source
+    assert "if (state == 1 || state == 2) {\n        g_trailCount = 0;" in source
 
 
 def test_save_waits_for_the_levels_own_floor():
@@ -446,18 +469,26 @@ def test_save_waits_for_the_levels_own_floor():
     the game's own footing flag (bit 22 at [actor+0x10]+0x380, read off two
     labelled test runs) is off on lifts, platforms and in the air, so Save
     needs it on, and the trail of fallback spots only keeps floor she stood on
-    while it was. Anything unreadable counts as off
+    while it was. Anything unreadable counts as off.
+
+    The pause screen clears that bit a frame or two in, so Withheld goes by the
+    last free roam sample, not a live read. A live read there turned every
+    press into a refusal (chapter 2, Nov 14)
     """
     source = SOURCE.read_text(encoding="utf-8")
     assert "constexpr DWORD kActorFooting = 0x10, kFootingFlags = 0x380, kFootingGround = 0x398;" in source
     assert "constexpr DWORD kOnLevelFloor = 1u << 22;" in source
     withheld = source[source.index("const char* Withheld() {"):]
     withheld = withheld[:withheld.index("\n}\n")]
-    assert "!ReadFooting(PlayerHandle(), footing) || !footing.solid" in withheld
+    assert "if (!g_idleSolid && !(g_nearFloor && g_trailCount > 0))" in withheld and "ReadFooting" not in withheld
     footing = source[source.index("bool ReadFooting(DWORD handle, Footing& out) {"):]
     footing = footing[:footing.index("\n}\n")]
     assert "if (got < sizeof block) return false;" in footing
-    assert "ReadFooting(PlayerHandle(), footing) && footing.solid)\n                Remember(next.pos);" in source
+    assert "if (now - g_idleSince >= 100) {\n                const bool read = ReadFooting(PlayerHandle(), footing);\n" \
+           "                g_idleSolid = read && footing.solid;" in source
+    assert "if (Steady(rise) && !carried && g_idleSolid && offRide) {" in source
+    # a new field starts her off the floor until she's sampled standing on it
+    assert "g_trailCount = 0;\n        g_pathCount = 0;\n        g_idleSolid = false;" in source
 
 
 def test_spots_and_dumps_keep_to_their_own_folders():
@@ -483,4 +514,576 @@ def test_the_log_rotates_and_the_spots_folder_explains_itself():
     assert worker.index("RotateLog();") < worker.index("Log(")
     assert "1024 * 1024" in source and 'L".1"' in source
     assert "ExplainLocations();" in source[source.index("void WriteWhere("):]
-    assert "Safe to delete" in source
+    assert "Keep them with your saves." in source
+
+
+def test_restart_points_count_like_a_station():
+    """
+    White.doRestartSave is where the scripts write the snapshot game over's
+    Retry rebuilds the field from, so the designers already vouch for it the
+    way they do for a station. Chapter 3 has long stretches with a scene behind
+    you and no station ahead (Nov 14), so these let Save back on. Only if
+    nothing that persists moved between the point and free roam, and only in
+    the field it was set in
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kRestartSaveRva = 0x7E63D0;" in source
+    assert "{kRestartSaveRva, kRestartSaveHead, sizeof kRestartSaveHead}," in source
+    assert "reinterpret_cast<LPVOID>(&RestartSaveHook)" in source
+    hook = source[source.index("int __cdecl RestartSaveHook(void* vm) {"):]
+    hook = hook[:hook.index("\n}\n")]
+    # the original runs first, so the snapshot is written before we look
+    assert hook.index("g_restartSave(vm)") < hook.index("ReadProgress(g_restartAt)")
+    drifted = source[source.index("const char* Drifted("):]
+    drifted = drifted[:drifted.index("\n}\n")]
+    for field in ("story", "flags", "work", "zone"):
+        assert f"now.{field}" in drifted
+    # mid-sequence locks are on when a script sets the point, so they can't count
+    assert "now.ui" not in drifted and "now.menu" not in drifted
+    taken = source[source.index("if (state == kStateFieldIdle && g_restartPoint.exchange(false)) {"):]
+    taken = taken[:taken.index("\n    }\n")]
+    assert "Drifted(now, g_restartAt)" in taken and 'Sanctify("a restart point", false);' in taken
+    assert "g_runMs = 0;\n        // a field change after the point means it's not this field's any more\n" \
+           "        g_restartPoint = false;" in source
+
+
+def test_what_the_scripts_did_to_the_field_goes_with_the_save():
+    """
+    a save keeps the party, not the field: which areas are on, which boxes are
+    live, where a door's animation stopped. The station's load script rebuilds
+    those from its own side of the story, and the zone scripts show most of
+    what an event turns on afterwards is never in one (Nov 15). So the engine
+    end of every one of those calls is journalled, the journal goes in the
+    .where, and a load of ours puts back whatever the rebuild left different
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    for site in ("kAreaOnRva", "kAreaFadeRva", "kAreaOffRva", "kObjectRva", "kBgAnimRva", "kLayoutRva",
+                 "kEncountRva"):
+        assert f"{{{site}, " in source
+    assert "WriteWorld(file, g_savedWorld, g_savedZone, g_savedMapSet);" in source
+    check = source[source.index("void CheckWorld() {"):]
+    check = check[:check.index("\n}\n")]
+    assert "Missing(g_pending, have, &other, boxes, g_realFrom)" in check and "Replay(e)" in check
+    replay = source[source.index("bool Replay(const Entry& e) {"):]
+    replay = replay[:replay.index("\n}\n")]
+    # back through the hooked entries, so the journal sees the replay too
+    assert "g_base + kAreaOnRva" in replay and "g_areaOn(" not in replay
+    # a door that was opening comes back open, not opening again
+    assert "int ReplayMode(int mode) { return mode == 1 ? 5 : mode; }" in source
+
+
+def test_the_journal_only_ever_holds_the_field_youre_in():
+    """a load, a retry and a new zone each start a field from nothing, and a journal from before would put back a world that's gone"""
+    source = SOURCE.read_text(encoding="utf-8")
+    read = source[source.index("int __fastcall SaveReadHook("):]
+    read = read[:read.index("\n}\n")]
+    assert 'ForgetWorld("a load");' in read
+    retry = source[source.index("int __fastcall RetryHook("):]
+    assert retry.index('ForgetWorld("retry");') < retry.index("g_retry(self, edx)")
+    note = source[source.index("void Note(Op op,"):]
+    note = note[:note.index("\n}\n")]
+    assert 'if (zone != g_worldZone) ForgetWorld("a new zone");' in note
+
+
+def test_a_load_waits_for_the_real_rebuild_before_putting_anything_back():
+    """
+    the first free roam after a load is the stand-in at 0 1.5 -10, before the
+    station's load script has run. A replay there hung the load for good (Nov
+    15), so it waits for the player and quiet calls, and only replays a
+    journal from this zone
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    wait = tick[tick.index("if (g_worldCheckWanted"):]
+    wait = wait[:wait.index("CheckWorld()")]
+    assert "!StandIn(at)" in wait and "g_lastNoteAt" in wait
+    check = source[source.index("void CheckWorld() {"):]
+    assert check.index("g_pendingZone != g_worldZone") < check.index("Replay(e)")
+
+
+def test_only_what_a_script_asked_for_goes_in_the_journal():
+    """
+    the engine toggles areas around fights and refreshes enemy groups by itself
+    and keeps its own tally. Replaying one of its offs left a save station
+    invisible until the next load (Nov 15), so the hooks keep a call only when
+    a native made it, or for areas an area box, and a 5's journal, made before
+    that, is never replayed
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    for hook in ("AreaFadeHook", "ObjectHook", "EncountHook"):
+        body = source[source.index(f"int __fastcall {hook}(") if "Encount" not in hook else source.index(f"int __cdecl {hook}("):]
+        body = body[:body.index("\n}\n")]
+        assert "FromScript(__builtin_return_address(0))" in body
+    for hook in ("AreaOnHook", "AreaOffHook"):
+        body = source[source.index(f"int __fastcall {hook}("):]
+        body = body[:body.index("\n}\n")]
+        assert "const bool kept = (FromScript(from) || box) && Named(name);" in body
+    assert "version >= 6 && !ReadWorld(" in source
+
+
+def test_a_spot_loads_into_the_map_set_it_was_saved_in():
+    """a station stays the save point past where its own map set ends, and its load always asks for its own, so a spot out in another one loaded into sky (Nov 15)"""
+    source = SOURCE.read_text(encoding="utf-8")
+    hook = source[source.index("int __fastcall MapSetHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "g_pendingZone == ZoneNumber()" in hook and "g_mapSet(zone, edx, want)" in hook
+
+
+def test_a_scene_that_changed_nothing_doesnt_hold_save_back():
+    """
+    a terminal's own menu is an event state, so just using one turned Save
+    off until you walked back into its area (Nov 15). Only a scene that left
+    the story, flags, script variables, zone flags and the field untouched
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "g_notes.load() == g_notesAtScene && !Moved(after) && !Drifted(after, g_sceneStart)" in tick
+
+
+def test_plain_ground_after_a_hop_still_counts_as_floor():
+    """
+    after one of the game's hops the floor bit stayed off on plain ground
+    until she was well away (Vile Peaks, Nov 15), so level with and near the
+    last floor spot counts for the save. The fallback trail stays strict
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert "if (!g_idleSolid && !(g_nearFloor && g_trailCount > 0))" in withheld
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "if (Steady(rise) && !carried && g_idleSolid && offRide) {" in tick
+
+
+def test_a_ride_holds_save_back_till_shes_walked_off_it():
+    """
+    Ch 9 on an older build: a save on a lift going up after a scene, no lift on
+    load, a fall to the fight floor below, and that fight no longer starts the
+    scene. Steady only sees half a second and the game may call a stopped lift
+    floor, so a ride latches until she's stood on floor a few metres off it,
+    and after a scene there has to be walked floor for a missing one to land on
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    # sustained and steeper than 45, so stairs and a hop never latch
+    assert "std::hypot(dx, dz) < 0.5f * std::fabs(stepDy)" in tick
+    # longer than any jump or climb, and being carried isn't one: judged every
+    # step it caught plain running round corners, and at 1.2 s and 1 m a hop
+    # up onto a junk pile counted (Vile Peaks, Nov 16)
+    assert "if (g_runMs >= 2000 && std::fabs(g_runDy) >= 2.0f) {" in tick and "|| carried" not in tick
+    # a load settling her onto the spot isn't a ride
+    assert "if (g_landCheckAt) {\n                g_runDy = 0;" in tick
+    # pauses, fights, scenes and teleports break a run but never clear the latch
+    assert "dt <= 1000" in tick and "< 2.0f;" in tick
+    # nothing on the ride goes on the trail
+    assert tick.index("offRide") < tick.index("Remember(next.pos)")
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert "if (g_rode)\n        return g_rodeByScene ?" in withheld
+    assert "if (g_trailCount == 0 && (g_sceneSince >= 0 || now.story != g_sanctioned.story))" in withheld
+    sanctify = source[source.index("void Sanctify("):]
+    sanctify = sanctify[:sanctify.index("\n}\n")]
+    assert "g_rode = false;" in sanctify
+
+
+def test_a_load_of_ours_counts_once_the_field_is_put_back():
+    """
+    sanctioned off the stand-in's idle, the station's own load scene came
+    after and held Save off until the next station after every load of ours
+    (Vile Peaks, Nov 15)
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    ours = source[source.index("} else if (g_sanction == kOurs) {"):]
+    ours = ours[:ours.index("} else {")]
+    assert ours.index("if (!g_worldCheckWanted) {") < ours.index('Sanctify("a save anywhere load");')
+
+
+def test_a_save_of_ours_gets_its_field_back_even_when_its_spot_cant_be_used():
+    """
+    a save made after a story beat needs the field put back whether or not it
+    starts at the spot, so the journal is taken whenever the save is ours, and
+    the replay goes by the zone, not the map set: a step across a swap box
+    before the replay ran used to skip it whole
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    arm = source[source.index("void TryArm(int marker) {"):]
+    arm = arm[:arm.index("\n}\n")]
+    assert arm.index("if (ours && load.hash == stored && format >= 6) {") < arm.index("if (!ours) {")
+    check = source[source.index("void CheckWorld() {"):]
+    check = check[:check.index("\n}\n")]
+    assert "if (g_pendingZone != g_worldZone) {" in check and "MapSetName()" not in check
+    # only the area boxes' groups go by the map set, the one she came up on
+    assert "g_realSet == g_pendingMapSet" in check
+    # and only the rebuild's own map set ask is ever swapped
+    hook = source[source.index("int __fastcall MapSetHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "g_mapSetSwapLeft = false;" in hook
+
+
+def test_the_spots_folder_says_to_keep_the_files():
+    """since 0.25 a .where carries the field too, so the note that called them safe to delete had to go"""
+    source = SOURCE.read_text(encoding="utf-8")
+    explain = source[source.index("void ExplainLocations() {"):]
+    explain = explain[:explain.index("\n}\n")]
+    assert "Safe to delete" not in explain and "Keep them with your saves." in explain
+    assert "GetFileAttributesA" not in explain
+
+
+def test_charas_and_talk_reset_with_the_field_but_not_at_a_restart_point():
+    source = SOURCE.read_text(encoding="utf-8")
+    forget = source[source.index("void ForgetWorld(const char* why) {"):]
+    forget = forget[:forget.index("\n}\n")]
+    assert "g_charaNet.clear();" in forget and "g_lockedAtSanction = g_lockedNotes.load();" in forget
+    sanctify = source[source.index("void Sanctify(const char* where, bool baseline = true) {"):]
+    sanctify = sanctify[:sanctify.index("\n}\n")]
+    assert sanctify.index("if (baseline) {") < sanctify.index("g_charaNet.clear();")
+
+
+def test_the_area_boxes_groups_come_back_with_the_spot():
+    """
+    the map data's area boxes (0x5C88D0, four groups, all on or all off) turn
+    on the next stretch of level's gr_fa group as you walk into it, and its
+    save station's terminal lives in that group. A load past the box starts at
+    a station before it, so with those calls left out the terminal ahead stood
+    invisible, solid and dead (Vile Peaks, Nov 16). They go in the journal
+    marked as a box's, and come back only at the spot, on the map set it was
+    saved on, and not over a box she's walked through since
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kAreaBoxFrom = 0x1C88D0, kAreaBoxTo = 0x1C9AA5;" in source
+    on = source[source.index("int __fastcall AreaOnHook("):]
+    on = on[:on.index("\n}\n")]
+    assert "Note(Op::AreaOn, name, nullptr, flags, box);" in on
+    assert "bool FromBox(const Entry& e) { return Kind(e.op) == 0 && e.j == 1; }" in source
+    # who toggled it isn't the effect
+    assert "(Kind(x.op) == 0 || x.j == y.j)" in source
+    missing = source[source.index("std::vector<Entry> Missing("):]
+    missing = missing[:missing.index("\n}\n")]
+    assert "(FromBox(w) && !boxes)" in missing
+    assert "FromBox(w) && it != have.end() && FromBox(*it) && it->seq > walked" in missing
+    check = source[source.index("void CheckWorld() {"):]
+    check = check[:check.index("\n}\n")]
+    assert "g_spotUsed && g_realSet == g_pendingMapSet && read &&" in check and "< kBoxReach" in check
+    # the stand-in's boxes aren't hers
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "if (Position(PlayerHandle(), at) && !StandIn(at)) {\n            g_realFrom = g_notes.load();" in tick
+
+
+def test_a_pause_holds_the_load_check_rather_than_restarting_it():
+    """
+    the field check after a load wanted a second of unbroken free roam, so
+    pausing to check Save straight after loading kept putting it off, and Save
+    stayed off for eight pauses in a row (Vile Peaks, Nov 16). Free roam since
+    the load now adds up across pauses, and the reason says what it's waiting on
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "if (state != kStateFieldPause && state != kStateFieldPauseWait && state != kStateFieldPauseEnd) g_roamMs = 0;" in tick
+    assert "if (g_worldCheckWanted && state == kStateFieldIdle && g_roamMs > 1000 &&" in tick
+    # and so does the sanction after it, which kept starting its 2 s over
+    assert "if (g_sanction != kNone && state == kStateFieldIdle && g_roamMs > 2000) {" in tick
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (g_worldCheckWanted)") < withheld.index("if (g_sanctioned.story < 0)")
+
+
+def test_a_cutscene_a_callback_loaded_for_later_comes_back_with_the_save():
+    """
+    ac_hiku_011's callback loads ac_hiku_013's schedule for the lift button
+    and no station's load script does, so a save between them loaded with the
+    button live and nothing to play: pressing it waited on a cutscene that
+    never came, a softlock (Ch 9, Nov 19). Cutscene data in and out goes in the
+    journal, scripts' and the event-load boxes' loads and anyone's unloads,
+    and a load only ever puts data back in
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kCutsceneRva = 0x47E80, kCutsceneHolderRva = 0x23FCE04;" in source
+    assert "{kCutsceneRva, kCutsceneHead, sizeof kCutsceneHead}," in source
+    assert "HookAt(kCutsceneRva, &CutsceneHook, g_cutscene)" in source
+    hook = source[source.index("int __fastcall CutsceneHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "(!load || FromScript(from) || FromAreaBox(from))" in hook
+    assert "case Op::Cutscene: return 5;" in source and "bool Replayable(Op op) { return Kind(op) <= 5; }" in source
+    missing = source[source.index("std::vector<Entry> Missing("):]
+    missing = missing[:missing.index("\n}\n")]
+    assert "if (w.op == Op::Cutscene && !w.i) continue;" in missing
+    replay = source[source.index("bool Replay(const Entry& e) {"):]
+    replay = replay[:replay.index("\n}\n")]
+    assert "case Op::Cutscene: {" in replay and "g_base + kCutsceneRva" in replay
+    # a newer op in an older reader is a bad file, not a crash
+    assert "op < 0 || op > static_cast<int>(Op::Cutscene) ||" in source
+
+
+def test_the_field_goes_back_after_she_lands_not_before():
+    """
+    0.25.17 put the lift and its apron back before she spawned, and a load
+    onto plain walkway near the lift went through as well as the apron, where
+    with the replay after the landing (0.25.10) walkway loads there held. So
+    the replay waits for her, and a refused bg anim stays out of the journal
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "EarlyReplay" not in source
+    replay = source[source.index("bool Replay(const Entry& e) {"):]
+    replay = replay[:replay.index("\n}\n")]
+    assert "if (took) Note(" in replay
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    real = tick.index("g_realFrom = g_notes.load();")
+    assert "if (g_landCheckAt) g_landCheckAt = now;" in tick[real:real + 400]
+
+
+def test_a_scene_that_moves_her_holds_save_till_she_walks_off():
+    """
+    the button cutscene stood her on the lift it brought down and the game
+    calls a parked lift floor, so the footing check passed a save on it. A
+    scene that moves her over 2 m latches the ride guard where it left her,
+    and nothing closer goes on the trail. A lift needs 6 m off it, a scene's
+    spot only a metre: the Ch 9 jump's landing has less than 6 m of walkway
+    before the button, and the slab it lands her on is the moving-piece check's
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "g_sceneFromRead = Position(PlayerHandle(), g_sceneFrom);" in tick
+    end = tick.index('Moment("back in free roam after a scene");')
+    after = tick[end:end + 1600]
+    # a scene that changed nothing doesn't latch: the no-op check comes first
+    assert after.index("g_sceneSince = -1;") < after.index("g_rodeByScene = true;")
+    assert "std::hypot(at.v[0] - g_sceneFrom.v[0], at.v[2] - g_sceneFrom.v[2]) > 2.0f" in after
+    # and a load's own scene never latches it (Ch 9, Nov 22: every load logged one)
+    assert "g_sceneSince >= 0 && !g_worldCheckWanted && g_sanctioned.story >= 0" in after
+    assert "constexpr float kOffRide = 6.0f;" in source and "constexpr float kOffScene = 1.0f;" in source
+    assert "(g_rodeByScene ? kOffScene : kOffRide);" in tick
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (g_rode)") < withheld.index("if (!g_idleSolid")
+
+
+def test_a_spot_that_dropped_her_is_skipped_on_the_next_load_and_save_waits():
+    """
+    nothing moves her body once it's spawned, so a spot that dropped her is
+    written beside its .where and the next load of that save starts on the
+    newest ground she walked that's 5 m or more off it: the Ch 9 apron's
+    three newest trail spots were all on the apron. Save stays off till she's
+    been at a station, since she fell somewhere a save would softlock, and a
+    new save over the slot drops the list
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr float kSamePiece = 5.0f;" in source
+    assert 'std::string LostPath(int slot) { return WherePath(slot) + ".lost"; }' in source
+    write = source[source.index("void WriteWhere(const SlotHash& save) {"):]
+    assert "DeleteFileA(LostPath(save.slot).c_str());" in write[:200]
+    assert "if (DeleteFileA(WherePath(slot).c_str())) g_staleSlot = slot;\n        DeleteFileA(LostPath(slot).c_str());" in source
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (g_lostLanding)") < withheld.index("g_sanctioned.story < 0")
+    assert "g_lostLanding = false;" in source[source.index("void Sanctify("):]
+    arm = source[source.index("void TryArm(int marker) {"):]
+    arm = arm[:arm.index("\n}\n")]
+    assert "g_lostLanding = false;" in arm
+
+
+def test_the_layers_under_her_are_surveyed_at_each_debug_pause_and_nothing_hooks_threads():
+    """
+    layer 11, the one the controller's ray uses, came back empty under every
+    floor (0.25.18), so with Debug on each pause logs what the same ray finds
+    under her on every layer, to map against which spots load and which drop
+    her. The hardware watch that found the ray is gone: setting debug
+    registers on every thread is no thing to leave in
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "SetThreadContext" not in source and "AddVectoredExceptionHandler" not in source
+    survey = source[source.index("void SurveyLayers(const Vec4& at) {"):]
+    survey = survey[:survey.index("\n}\n")]
+    assert "bit < 0 ? -1 : 1 << bit" in survey
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    dump = tick.index("DumpActor();")
+    assert "SurveyLayers(at);" in tick[dump:dump + 200]
+    assert tick.rfind("if (g_debug) {", 0, dump) > 0
+
+
+def test_save_stays_off_on_a_moving_piece_of_the_level():
+    """
+    the level's own floor isn't in the engine's ray world, only the stuff it
+    moves: every spot that dropped her on load read layer 16 at her feet, the
+    Ch 9 slab reads it before the button too, and plain floor reads nothing.
+    So Save asks the same ray for anything but her body and the plane under
+    the field, through the half metre either side of her feet. It's the last
+    check, being a call into the engine, and no world means no answer rather
+    than a no
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr int kNotFloorLayers = ~((1 << 1) | (1 << 14));" in source
+    piece = source[source.index("bool OnMovingPiece(const Vec4& at) {"):]
+    piece = piece[:piece.index("\n}\n")]
+    assert "if (!world) return false;" in piece
+    # only in a field a script or cutscene has posed a bg anim in: Palumpolum's
+    # plaza reads 16 nearly everywhere and has none
+    assert piece.index("if (!g_fieldAnimates) return false;") < piece.index("void* world")
+    forget = source[source.index("void ForgetWorld(const char* why) {"):]
+    assert "g_fieldAnimates = false;" in forget[:forget.index("\n}\n")]
+    bg = source[source.index("int __fastcall BgAnimHook("):]
+    bg = bg[:bg.index("\n}\n")]
+    assert bg.index("if (kept) {") < bg.index("g_fieldAnimates = true;")
+    assert "at.v[1] + 0.5f" in piece and "at.v[1] - 0.5f" in piece
+    assert "kNotFloorLayers) & 0xFF" in piece
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (Carried())") < withheld.index("OnMovingPiece(at)")
+    assert withheld.index("OnMovingPiece(at)") < withheld.rindex("return nullptr;")
+    # and the trail a lost load falls back on only keeps what Save would take
+    remember = source[source.index("void Remember(const Vec4& at) {"):]
+    remember = remember[:remember.index("\n}\n")]
+    assert "if (OnMovingPiece(at)) return;" in remember
+
+
+def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
+    """
+    every load ends 1.6 to 1.8 m forward of where it set her down, a station's
+    own too, so with Debug on setMatrix gets watched for the leader through
+    the after-the-load trace, and those lines say if the stick or the movement
+    keys were held. The hook's on in every build now, for the ease-in hold, but
+    a failure to hook it doesn't stop the rest and its lines stay Debug only
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kSetMatrixRva = 0x3C1970, kControllerWriteRva = 0x227683;" in source
+    assert "if (!HookAt(kSetMatrixRva, &SetMatrixHook, g_setMatrix)) {" in source
+    assert "g_debug && !HookAt(kSetMatrixRva" not in source
+    hook = source[source.index("int __fastcall SetMatrixHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "if (!m || self != g_watchActor.load()) return g_setMatrix(self, edx, m, warp, lock);" in hook
+    assert "if (GetTickCount64() < g_watchUntil.load()) {" in hook and "g_watchLines++ < 120" in hook
+    assert hook.rstrip().endswith("return g_setMatrix(self, edx, m, warp, lock);")
+    # the watch window is the Debug trace's, which is 0 without Debug
+    assert "g_heightTraceUntil = g_debug ? now + 4000 : 0;" in source
+    assert "g_watchUntil = g_heightTraceUntil;" in source
+    assert 'Log("  after the load: %.2f %.2f %.2f (%s, controller %08lx)"' in source
+    # and the field player controller's flags each line, then what in it
+    # changed across the trace
+    assert "constexpr DWORD kFieldPlayerRva = 0x23FF554;" in source
+    assert 'Log("  controller through the trace: %d of %u dwords changed"' in source
+
+
+def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on_the_spot():
+    """
+    the field controller eases every load in from 4.0625 m off the marker to
+    2.25, which walked ours 1.75 m on along her heading. So a save keeps its
+    straight walk in, crumbs 1.74 to 2.5 m back to the spot, and the marker
+    goes 2.25 m ahead along that line: she starts on ground she walked and the
+    ease-in finishes on the spot. With nothing walked on file it's the same
+    along her heading, from behind the spot, never past it
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "HoldArrival" not in source and "kArrival" not in source
+    find = source[source.index("bool FindWalk(const Vec4& spot, Walk& walk) {"):]
+    find = find[:find.index("\n}\n")]
+    assert "if (flat(at(0), spot) > 0.5f) return false;" in find
+    assert "if (d < 1.74f) continue;" in find
+    assert "if (d > 2.5f || std::fabs(c.v[1] - spot.v[1]) > 1.2f || OnMovingPiece(c)) return false;" in find
+    assert "if (side > 0.4f || along < lastAlong - 0.1f) return false;" in find
+    # every crumb from there on, and the spot's own height to finish on
+    assert "for (int k = back; k >= 0; --k) walk.at[walk.count++] = at(k);" in find
+    assert "walk.at[walk.count++] = spot;" in find
+    # crumbs only on steady ground off any ride, and the path restarts with the trail
+    tick = source[source.index("void Tick() {"):]
+    assert "NotePath(next.pos);\n            } else {\n                g_pathCount = 0;" in tick
+    import re
+    resets = re.findall(r"\n( +)g_trailCount = 0;\n( +)(\w+)", source)
+    assert resets and all(a == b and name == "g_pathCount" for a, b, name in resets)
+    save = source[source.index("void StartSave() {"):]
+    assert "FindWalk(Translation(g_savedMatrix.m), g_savedWalk);" in save[:save.index("\n}\n")]
+    assert 'fprintf(file, "\\nwalk %d", g_savedWalk.count);' in source
+    # a 7 still loads, its one crumb a straight line to the spot
+    assert "version >= 3 && version <= 8" in source
+    assert 'fscanf_s(file, " approach %d %f %f %f"' in source and 'fscanf_s(file, " walk %d", &points)' in source
+    spawn = source[source.index("Matrix SpawnMatrix("):]
+    spawn = spawn[:spawn.index("\n}\n")]
+    assert "walk.at[0] = {{spot.v[0] - kEaseInRun * fx, spot.v[1], spot.v[2] - kEaseInRun * fz, 1.0f}};" in spawn
+    assert "out.m[12] = spot.v[0] + kEaseInTo * fx;" in spawn
+    # the marker level with the spot, since it's where the controller settles
+    # her after the ease-in: one at the bottom of a wave she'd walked up sank
+    # her 1.2 m into it (0.25.37, Nov 26)
+    assert "out.m[13] = spot.v[1] - kSpawnRise;" in spawn
+    assert "WalkHeight(" not in spawn
+    # and a load seeds the next path with where it set her down
+    hook = source[source.index("int __fastcall MarkerLookupHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "g_seedPath = true;" in hook and "g_holdWalk = g_spawn.walk;" in hook
+    assert "if (g_seedPath.exchange(false)) {" in source
+    # a spot AvoidLostSpots moved isn't the one she walked in to
+    arm = source[source.index("void TryArm(int marker) {"):]
+    arm = arm[:arm.index("\n}\n")]
+    assert "if (!same) walk.count = 0;" in arm and "g_holdWalk.count = 0;" in arm
+
+
+def test_the_ease_in_is_held_to_the_heights_she_walked_in_at():
+    """
+    the ease-in runs her at the marker's height, or the level floor's under the
+    marker, not the ground under her. Lake Bresha's frozen waves aren't that
+    floor: down one it set her 0.9 m into the ice, up one 0.2, and she walked
+    out under the level (Ch 3, Nov 26). So the controller's own write of her
+    gets the walk in's height at wherever it has her, and so does its state
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr size_t kControllerAt = 0x1A8, kControllerAimY = 0x1BC;" in source
+    hook = source[source.index("int __fastcall SetMatrixHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "if (g_holding && from == kControllerWriteRva && HoldToWalk(m, held)) m = held;" in hook
+    hold = source[source.index("bool HoldToWalk(const float* m, float* out) {"):]
+    hold = hold[:hold.index("\n}\n")]
+    assert "float y = WalkHeight(g_holdWalk, m[12], m[14], &side, &left);" in hold
+    assert "out[13] = y;" in hold
+    # its own numbers only, so a write that isn't it is left alone
+    assert "if (std::fabs(at[0] - m[12]) < 0.01f && std::fabs(at[2] - m[14]) < 0.01f) {" in hold
+    assert "*reinterpret_cast<float*>(ctrl + kControllerAimY) = y;" in hold
+    # it lets go off the line or out of time on the way, and once it's on the
+    # spot only when she walks off it: let go standing, the controller settled
+    # her 1.38 m into the wave she'd walked up (0.25.35, Nov 26)
+    assert "} else if (side > 0.5f || left < -0.5f) {" in hold
+    assert "} else if (GetTickCount64() > g_holdUntil) {" in hold
+    pinned = hold[hold.index("if (g_holdAtSpot >= 3) {"):hold.index("} else if (side")]
+    assert "y = spot.v[1];" in pinned
+    assert "if (off > 0.3f) {" in pinned
+    assert "if (g_holdAtSpot < 3 && (left <= 0.02f || off < 0.05f) && ++g_holdAtSpot == 3)" in hold
+    # an ease-in that runs out of time near the spot gets pinned there, not let go to settle
+    near = hold[hold.index("if (g_holdAtSpot < 3 && GetTickCount64() > g_holdUntil && off < 0.3f) {"):]
+    assert near.index("g_holdAtSpot = 3;") < near.index("if (g_holdAtSpot >= 3) {")
+    # and with Debug the let-go says how hard it was pulling and traces what comes after
+    letgo = source[source.index("void LetGo(const float* at, const char* why) {"):]
+    letgo = letgo[:letgo.index("\n}\n")]
+    assert "g_holdPullWay, g_holdPullSpot" in letgo
+    assert "if (g_debug) {" in letgo and "g_heightTraceUntil = GetTickCount64() + 2000;" in letgo
+    # and a field that's gone takes the hold with it, so it can't catch the next leader
+    forget = source[source.index("void ForgetWorld(const char* why) {"):]
+    assert "g_holding = false;" in forget[:forget.index("\n}\n")]
+    tick = source[source.index("void Tick() {"):]
+    assert "if (g_landCheckAt && g_setMatrix && g_holdWalk.count >= 2) {" in tick
+    assert "g_holdUntil = now + 5000;" in tick
+    assert "if (g_setMatrix && (g_holding || (g_heightTraceUntil && now < g_heightTraceUntil))) {" in tick
+
+
+def test_a_landing_under_the_spot_is_marked_like_a_drop():
+    """
+    a load that set her into the ice still offered Save on the spot, and the
+    save straight after it loaded under the level too. A landing more than
+    30 cm under the spot marks it the way a drop does. Her height alone: a
+    ray for a floor over her flagged two landings that were dead on, since
+    after a load something with a flat underside sits right over her
+    (0.25.38, Nov 26), so that ray's Debug logging only
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "UnderFloor" not in source
+    land = source[source.index("void TickLoad(int state) {"):]
+    land = land[:land.index("\n}\n")]
+    assert "if (drop > 0.3f) {" in land
+    after = land[land.index("if (drop > 0.3f) {"):]
+    assert after.index("LoseSpot(g_loadedSlot, g_landTarget);") < after.index("g_lostLanding = true;")
+    survey = source[source.index("void SurveyLayers(const Vec4& at) {"):]
+    survey = survey[:survey.index("\n}\n")]
+    assert "LogOverHer(at);" in survey
