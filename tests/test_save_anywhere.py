@@ -292,12 +292,12 @@ def test_a_load_of_ours_lands_through_the_spawn_alone_and_still_checks_for_a_fal
     spawn (Ch 9, Nov 23)
     """
     source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr float kSpawnStep = 4.0f;" in source
+    assert "constexpr float kEaseInTo = 2.25f, kEaseInFrom = 4.0625f, kEaseInRun = kEaseInFrom - kEaseInTo;" in source
     # the spawn lifts her 1.45 off the marker, so ours answers that much under
     # the floor she stood on, less 5 cm, the way a station's marker sits
     assert "constexpr float kSpawnRise = 1.40f;" in source
-    assert "out.m[13] = y - kSpawnRise;" in source
-    assert "g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0, g_spawn.approach, g_spawn.from);" in source
+    assert "kSpawnStep" not in source
+    assert "g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0, g_spawn.walk);" in source
     assert "SetPos" not in source and "0x2C3450" not in source
     body = source[source.index("void TickLoad(int state) {"):]
     body = body[:body.index("\n}\n")]
@@ -375,7 +375,7 @@ def test_a_station_is_what_makes_a_state_safe_to_save_in():
     assert 'Sanctify("a station")' in tick and "state == kStateFieldIdle" in tick
     assert 'Sanctify("the station this load started at")' in tick
     assert "if (format >= 4) g_sanction = kOurs;" in source
-    assert '"xiii-save-anywhere 7\\nhash' in source
+    assert '"xiii-save-anywhere 8\\nhash' in source
     assert "g_readBytes" not in source
     # any read wipes the old state until the new field's settled
     assert "g_sanctioned.story = -1;" in tick
@@ -948,16 +948,21 @@ def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     every load ends 1.6 to 1.8 m forward of where it set her down, a station's
     own too, so with Debug on setMatrix gets watched for the leader through
     the after-the-load trace, and those lines say if the stick or the movement
-    keys were held. It's on a function every actor calls every frame, so it's
-    never hooked without Debug and a failure to hook it doesn't stop the rest
+    keys were held. The hook's on in every build now, for the ease-in hold, but
+    a failure to hook it doesn't stop the rest and its lines stay Debug only
     """
     source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr DWORD kSetMatrixRva = 0x3C1970;" in source
-    assert "if (g_debug && !HookAt(kSetMatrixRva, &SetMatrixHook, g_setMatrix)) {" in source
+    assert "constexpr DWORD kSetMatrixRva = 0x3C1970, kControllerWriteRva = 0x227683;" in source
+    assert "if (!HookAt(kSetMatrixRva, &SetMatrixHook, g_setMatrix)) {" in source
+    assert "g_debug && !HookAt(kSetMatrixRva" not in source
     hook = source[source.index("int __fastcall SetMatrixHook("):]
     hook = hook[:hook.index("\n}\n")]
-    assert "self == g_watchActor.load()" in hook and "g_watchLines++ < 120" in hook
+    assert "if (!m || self != g_watchActor.load()) return g_setMatrix(self, edx, m, warp, lock);" in hook
+    assert "if (GetTickCount64() < g_watchUntil.load()) {" in hook and "g_watchLines++ < 120" in hook
     assert hook.rstrip().endswith("return g_setMatrix(self, edx, m, warp, lock);")
+    # the watch window is the Debug trace's, which is 0 without Debug
+    assert "g_heightTraceUntil = g_debug ? now + 4000 : 0;" in source
+    assert "g_watchUntil = g_heightTraceUntil;" in source
     assert 'Log("  after the load: %.2f %.2f %.2f (%s, controller %08lx)"' in source
     # and the field player controller's flags each line, then what in it
     # changed across the trace
@@ -968,22 +973,23 @@ def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
 def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on_the_spot():
     """
     the field controller eases every load in from 4.0625 m off the marker to
-    2.25, which walked ours 1.75 m on along her heading. Poking its fields
-    didn't take (0.25.29 to 0.25.31: the anchor it read is a smoothing ring
-    the game refills every frame), so nothing touches the controller now.
-    Instead a save keeps a crumb 1.85 to 2.5 m back on a straight walk in,
-    and the marker goes 2.25 m ahead of the spot along that line: she starts
-    on ground she walked and the ease-in finishes on the spot
+    2.25, which walked ours 1.75 m on along her heading. So a save keeps its
+    straight walk in, crumbs 1.74 to 2.5 m back to the spot, and the marker
+    goes 2.25 m ahead along that line: she starts on ground she walked and the
+    ease-in finishes on the spot. With nothing walked on file it's the same
+    along her heading, from behind the spot, never past it
     """
     source = SOURCE.read_text(encoding="utf-8")
     assert "HoldArrival" not in source and "kArrival" not in source
-    assert "constexpr float kEaseInTo = 2.25f, kEaseInFrom = 4.0625f;" in source
-    find = source[source.index("bool FindApproach(const Vec4& spot, Vec4& from) {"):]
+    find = source[source.index("bool FindWalk(const Vec4& spot, Walk& walk) {"):]
     find = find[:find.index("\n}\n")]
     assert "if (flat(at(0), spot) > 0.5f) return false;" in find
     assert "if (d < 1.74f) continue;" in find
     assert "if (d > 2.5f || std::fabs(c.v[1] - spot.v[1]) > 1.2f || OnMovingPiece(c)) return false;" in find
     assert "if (side > 0.4f || along < lastAlong - 0.1f) return false;" in find
+    # every crumb from there on, and the spot's own height to finish on
+    assert "for (int k = back; k >= 0; --k) walk.at[walk.count++] = at(k);" in find
+    assert "walk.at[walk.count++] = spot;" in find
     # crumbs only on steady ground off any ride, and the path restarts with the trail
     tick = source[source.index("void Tick() {"):]
     assert "NotePath(next.pos);\n            } else {\n                g_pathCount = 0;" in tick
@@ -991,22 +997,73 @@ def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on
     resets = re.findall(r"\n( +)g_trailCount = 0;\n( +)(\w+)", source)
     assert resets and all(a == b and name == "g_pathCount" for a, b, name in resets)
     save = source[source.index("void StartSave() {"):]
-    assert "g_savedApproach = FindApproach(Translation(g_savedMatrix.m), g_savedFrom);" in save[:save.index("\n}\n")]
-    assert 'fprintf(file, "\\napproach %d %.6f %.6f %.6f\\n"' in source
-    assert "version >= 3 && version <= 7" in source
+    assert "FindWalk(Translation(g_savedMatrix.m), g_savedWalk);" in save[:save.index("\n}\n")]
+    assert 'fprintf(file, "\\nwalk %d", g_savedWalk.count);' in source
+    # a 7 still loads, its one crumb a straight line to the spot
+    assert "version >= 3 && version <= 8" in source
+    assert 'fscanf_s(file, " approach %d %f %f %f"' in source and 'fscanf_s(file, " walk %d", &points)' in source
     spawn = source[source.index("Matrix SpawnMatrix("):]
     spawn = spawn[:spawn.index("\n}\n")]
-    # height taken off the walk in where she starts, not the spot's
-    assert "step = kEaseInTo;" in spawn
-    assert "y = from.v[1] + t * (saved.m[13] - from.v[1]) + std::min(0.4f, 1.6f * slope);" in spawn
+    assert "walk.at[0] = {{spot.v[0] - kEaseInRun * fx, spot.v[1], spot.v[2] - kEaseInRun * fz, 1.0f}};" in spawn
+    assert "out.m[12] = spot.v[0] + kEaseInTo * fx;" in spawn
+    assert "out.m[13] = WalkHeight(walk, spot.v[0] - kEaseInRun * fx, spot.v[2] - kEaseInRun * fz) - kSpawnRise;" in spawn
     # and a load seeds the next path with where it set her down
     hook = source[source.index("int __fastcall MarkerLookupHook("):]
     hook = hook[:hook.index("\n}\n")]
-    assert "g_seedPath = true;" in hook
+    assert "g_seedPath = true;" in hook and "g_holdWalk = g_spawn.walk;" in hook
     assert "if (g_seedPath.exchange(false)) {" in source
-    assert "out.m[13] = y - kSpawnRise;" in spawn
     # a spot AvoidLostSpots moved isn't the one she walked in to
     arm = source[source.index("void TryArm(int marker) {"):]
     arm = arm[:arm.index("\n}\n")]
-    assert "approach && same" in arm
-    assert "SpawnMatrix(g_spawn.matrix, out0, g_spawn.approach, g_spawn.from)" in source
+    assert "if (!same) walk.count = 0;" in arm and "g_holdWalk.count = 0;" in arm
+
+
+def test_the_ease_in_is_held_to_the_heights_she_walked_in_at():
+    """
+    the ease-in runs her at the marker's height, or the level floor's under the
+    marker, not the ground under her. Lake Bresha's frozen waves aren't that
+    floor: down one it set her 0.9 m into the ice, up one 0.2, and she walked
+    out under the level (Ch 3, Nov 26). So the controller's own write of her
+    gets the walk in's height at wherever it has her, and so does its state
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr size_t kControllerAt = 0x1A8, kControllerAimY = 0x1BC;" in source
+    hook = source[source.index("int __fastcall SetMatrixHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "if (g_holding && from == kControllerWriteRva && HoldToWalk(m, held)) m = held;" in hook
+    hold = source[source.index("bool HoldToWalk(const float* m, float* out) {"):]
+    hold = hold[:hold.index("\n}\n")]
+    assert "const float y = WalkHeight(g_holdWalk, m[12], m[14], &side, &left);" in hold
+    assert "out[13] = y;" in hold
+    # its own numbers only, so a write that isn't it is left alone
+    assert "if (std::fabs(at[0] - m[12]) < 0.01f && std::fabs(at[2] - m[14]) < 0.01f) {" in hold
+    assert "*reinterpret_cast<float*>(ctrl + kControllerAimY) = y;" in hold
+    # and it always lets go: on the spot, off the line, or out of time
+    assert "const bool walkedOff = side > 0.5f || left < -0.5f;" in hold
+    assert "GetTickCount64() > g_holdUntil" in hold
+    assert 'if (left <= 0.02f && ++g_holdAtSpot >= 3) LetGo(out + 12, "on the spot");' in hold
+    tick = source[source.index("void Tick() {"):]
+    assert "if (g_landCheckAt && g_setMatrix && g_holdWalk.count >= 2) {" in tick
+    assert "g_holdUntil = now + 5000;" in tick
+    assert "if (g_setMatrix && (g_holding || (g_heightTraceUntil && now < g_heightTraceUntil))) {" in tick
+
+
+def test_inside_the_floor_is_no_spot_to_save_or_land_on():
+    """
+    a load that set her into the ice still offered Save on the spot, and the
+    save straight after it loaded under the level too. A floor between her
+    waist and her head means she's in it: Save stays off, and a landing like
+    that marks the spot the way a drop does
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    under = source[source.index("bool UnderFloor(const Vec4& at) {"):]
+    under = under[:under.index("\n}\n")]
+    assert "at.v[1] + 1.5f" in under and "at.v[1] + 0.6f" in under and "kNotFloorLayers" in under
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (UnderFloor(at))") < withheld.index("if (OnMovingPiece(at))")
+    land = source[source.index("void TickLoad(int state) {"):]
+    land = land[:land.index("\n}\n")]
+    assert "if (drop > 0.3f || UnderFloor(at)) {" in land
+    after = land[land.index("if (drop > 0.3f || UnderFloor(at)) {"):]
+    assert after.index("LoseSpot(g_loadedSlot, g_landTarget);") < after.index("g_lostLanding = true;")
