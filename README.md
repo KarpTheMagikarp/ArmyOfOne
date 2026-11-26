@@ -88,8 +88,10 @@ Also included:
   layout comes from his [WhiteBinTools](https://github.com/Surihix/WhiteBinTools)
 
 Licences and the tools whose behaviour the patcher reimplements are in
-[docs/credits.md](docs/credits.md). Licensed GPL-3.0. Not affiliated with
-Square Enix.
+[docs/credits.md](docs/credits.md). Not affiliated with Square Enix.
+
+ArmyOfOne, Copyright (C) 2026 Cody Le ([KarpTheMagikarp](https://github.com/KarpTheMagikarp)).
+Licensed under [GPL-3.0](LICENSE).
 
 If ArmyOfOne saved you some time and you'd like to support it, I have a
 [Ko-fi](https://ko-fi.com/karpthemagikarp).
