@@ -1045,8 +1045,16 @@ def test_the_ease_in_is_held_to_the_heights_she_walked_in_at():
     assert "} else if (GetTickCount64() > g_holdUntil) {" in hold
     pinned = hold[hold.index("if (g_holdAtSpot >= 3) {"):hold.index("} else if (side")]
     assert "y = spot.v[1];" in pinned
-    assert "if (std::hypot(m[12] - spot.v[0], m[14] - spot.v[2]) > 0.3f) {" in pinned
-    assert "if (g_holdAtSpot < 3 && left <= 0.02f && ++g_holdAtSpot == 3)" in hold
+    assert "if (off > 0.3f) {" in pinned
+    assert "if (g_holdAtSpot < 3 && (left <= 0.02f || off < 0.05f) && ++g_holdAtSpot == 3)" in hold
+    # an ease-in that runs out of time near the spot gets pinned there, not let go to settle
+    near = hold[hold.index("if (g_holdAtSpot < 3 && GetTickCount64() > g_holdUntil && off < 0.3f) {"):]
+    assert near.index("g_holdAtSpot = 3;") < near.index("if (g_holdAtSpot >= 3) {")
+    # and with Debug the let-go says how hard it was pulling and traces what comes after
+    letgo = source[source.index("void LetGo(const float* at, const char* why) {"):]
+    letgo = letgo[:letgo.index("\n}\n")]
+    assert "g_holdPullWay, g_holdPullSpot" in letgo
+    assert "if (g_debug) {" in letgo and "g_heightTraceUntil = GetTickCount64() + 2000;" in letgo
     # and a field that's gone takes the hold with it, so it can't catch the next leader
     forget = source[source.index("void ForgetWorld(const char* why) {"):]
     assert "g_holding = false;" in forget[:forget.index("\n}\n")]

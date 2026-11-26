@@ -477,6 +477,9 @@ std::atomic<bool> g_holding{false};
 Walk g_holdWalk;
 ULONGLONG g_holdUntil = 0;
 int g_holdFrames = 0, g_holdAtSpot = 0;
+// how far the controller wanted her off the held height, on the way and once
+// on the spot: a pin that's never pulling against anything isn't doing work
+float g_holdPullWay = 0, g_holdPullSpot = 0;
 ULONGLONG g_landCheckAt = 0, g_landGiveUp = 0, g_landSeenAt = 0;
 Vec4 g_landTarget{}, g_stationPos{};
 // the save's trail, newest first: where a later load of it starts if the spot
@@ -2781,6 +2784,7 @@ void Tick() {
                 g_holdUntil = now + 5000;
                 g_holdFrames = 0;
                 g_holdAtSpot = 0;
+                g_holdPullWay = g_holdPullSpot = 0;
                 g_holding = true;
             }
             g_heightTraceUntil = g_debug ? now + 4000 : 0;
@@ -3192,7 +3196,14 @@ bool HookAt(DWORD rva, Fn detour, Fn& original) {
 
 void LetGo(const float* at, const char* why) {
     g_holding = false;
-    Log("let go of her at %.2f %.2f %.2f after %d frames (%s)", at[0], at[1], at[2], g_holdFrames, why);
+    Log("let go of her at %.2f %.2f %.2f after %d frames (%s). The controller wanted her up to %.2f m off on the way "
+        "in and %.2f m off on the spot", at[0], at[1], at[2], g_holdFrames, why, g_holdPullWay, g_holdPullSpot);
+    // Debug: two more seconds of who moves her, to see walking keep her on the floor
+    if (g_debug) {
+        g_heightTraceUntil = GetTickCount64() + 2000;
+        g_watchUntil = g_heightTraceUntil;
+        g_watchLines = 0;
+    }
 }
 
 // the controller's write of her through the ease-in, at the height she walked
@@ -3206,23 +3217,33 @@ bool HoldToWalk(const float* m, float* out) {
     const Vec4& spot = g_holdWalk.at[g_holdWalk.count - 1];
     float side = 0, left = 0;
     float y = WalkHeight(g_holdWalk, m[12], m[14], &side, &left);
+    const float off = std::hypot(m[12] - spot.v[0], m[14] - spot.v[2]);
+    // an ease-in that stops a hair short still counts, and one that runs out
+    // of time near enough gets pinned where it is rather than let go to settle
+    if (g_holdAtSpot < 3 && GetTickCount64() > g_holdUntil && off < 0.3f) {
+        g_holdAtSpot = 3;
+        Log("the ease-in stopped %.2f m off the spot, keeping her at its height there", off);
+    }
     if (g_holdAtSpot >= 3) {
         // and on the spot till she walks off it. Standing, it settles her
         // toward the floor under where it eased her to, so letting go there
-        // sank her 1.38 m into a wave she'd walked up (0.25.36, Nov 26).
+        // sank her 1.38 m into a wave she'd walked up (0.25.35, Nov 26).
         // Walking follows the floor she's on
         y = spot.v[1];
-        if (std::hypot(m[12] - spot.v[0], m[14] - spot.v[2]) > 0.3f) {
+        if (off > 0.3f) {
             LetGo(m + 12, "she walked off the spot");
             return false;
         }
+        g_holdPullSpot = std::max(g_holdPullSpot, std::fabs(m[13] - y));
     } else if (side > 0.5f || left < -0.5f) {
         // the stick: past here it's her walking, not the ease-in
         LetGo(m + 12, "she walked off the walk in");
         return false;
     } else if (GetTickCount64() > g_holdUntil) {
-        LetGo(m + 12, "the ease-in never got her to the spot");
+        LetGo(m + 12, "the ease-in never got her near the spot");
         return false;
+    } else {
+        g_holdPullWay = std::max(g_holdPullWay, std::fabs(m[13] - y));
     }
     std::memcpy(out, m, 16 * sizeof(float));
     out[13] = y;
@@ -3236,7 +3257,7 @@ bool HoldToWalk(const float* m, float* out) {
     }
     ++g_holdFrames;
     // a few writes on the spot, so its own last step down to it is ours too
-    if (g_holdAtSpot < 3 && left <= 0.02f && ++g_holdAtSpot == 3)
+    if (g_holdAtSpot < 3 && (left <= 0.02f || off < 0.05f) && ++g_holdAtSpot == 3)
         Log("held the ease-in to her walk in for %d frames, on the spot at %.2f %.2f %.2f till she moves", g_holdFrames,
             out[12], out[13], out[14]);
     return true;
@@ -3287,7 +3308,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.36, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.37, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3333,7 +3354,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.36";
+    d.version = "0.25.37";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
