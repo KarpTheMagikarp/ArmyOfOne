@@ -1,5 +1,7 @@
 # Licensing
 
+ArmyOfOne, Copyright (C) 2026 Cody Le (KarpTheMagikarp).
+
 ArmyOfOne is GPL-3.0. That's required, not a preference:
 `patcher/archive/crypt.py` ports the filelist cipher from Surihix's
 [WhiteCryptTool](https://github.com/Surihix/WhiteCryptTool) (GPL-3.0), and a
