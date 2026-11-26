@@ -770,6 +770,17 @@ bool g_worldCheckWanted = false;
 // free roam since the load, which a pause only holds: checking right after
 // loading paused the check too, and Save stayed off a good while (Nov 16)
 ULONGLONG g_roamMs = 0, g_roamAt = 0;
+// a script moving a piece of the level out in free roam is a platform being
+// called or sent, and the ray can't see one mid-leg (Palumpolum Ch 7, Nov 26:
+// a save on a platform it lost floated her on load). A ray latch on top of it
+// went wrong there too, since that level calls half its plain floor movable.
+// So Save waits out the trip on the clock, in free roam time since the field
+// stands still while paused. The platforms there take about 7 s a leg
+constexpr ULONGLONG kPieceTripMs = 20000;
+ULONGLONG g_pieceTripMs = 0;
+// a load's own script poses them all before she's ever in free roam, parked
+// where the flags say, and that's no trip
+bool g_roamedThisField = false;
 // the note count once it was her and not the stand-in after the load: an area
 // box after that is one she walked through, the stand-in's box isn't hers
 unsigned g_realFrom = ~0u;
@@ -987,6 +998,10 @@ int __fastcall BgAnimHook(void* scene, void* edx, const char* object, int arg, c
     const int out = g_bgAnim(scene, edx, object, arg, motion, mode);
     if (kept) {
         g_fieldAnimates = true;
+        if (g_roamedThisField) {
+            if (!g_pieceTripMs) Log("%s is moving, Save waits till it's parked", object);
+            g_pieceTripMs = kPieceTripMs;
+        }
         Note(Op::BgAnim, object, motion, arg, mode);
     }
     return out;
@@ -2016,6 +2031,7 @@ const char* Withheld() {
     if (g_rode)
         return g_rodeByScene ? "a scene moved her and she hasn't walked off where it left her yet"
                              : "she rode a lift and hasn't walked off it yet";
+    if (g_pieceTripMs) return "something the level moves (a platform) started moving, Save waits till it's parked";
     // near the floor only counts with ground walked since the last scene or
     // station behind it: if the spot's floor is gone on load, that's where she
     // lands instead of a station that may sit on the far side of the scene
@@ -2576,7 +2592,11 @@ void Tick() {
     if (state != kStateFieldIdle) g_idleSince = 0;
     else if (!g_idleSince) g_idleSince = now;
     if (state == kStateFieldIdle) {
-        if (g_roamAt) g_roamMs += now - g_roamAt;
+        g_roamedThisField = true;
+        if (g_roamAt) {
+            g_roamMs += now - g_roamAt;
+            g_pieceTripMs -= std::min(g_pieceTripMs, now - g_roamAt);
+        }
         g_roamAt = now;
     } else {
         g_roamAt = 0;
@@ -2589,6 +2609,8 @@ void Tick() {
         g_idleSolid = false;
         g_nearFloor = false;
         g_rode = false;
+        g_pieceTripMs = 0;
+        g_roamedThisField = false;
         g_runDy = 0;
         g_runMs = 0;
         // a field change after the point means it's not this field's any more
@@ -2662,12 +2684,19 @@ void Tick() {
                     Log("off %s, at %.2f %.2f %.2f", g_rodeByScene ? "where the scene left her" : "the lift", next.pos.v[0],
                         next.pos.v[1], next.pos.v[2]);
                 g_rode = false;
-                if (g_sanctioned.story >= 0) Remember(next.pos);
-                if (g_seedPath.exchange(false)) {
+                // ground mid-trip may be the platform, and a path that skips it
+                // would join across ground she never walked
+                if (g_pieceTripMs) {
                     g_pathCount = 0;
-                    NotePath(g_seedFrom);
+                    g_seedPath = false;
+                } else {
+                    if (g_sanctioned.story >= 0) Remember(next.pos);
+                    if (g_seedPath.exchange(false)) {
+                        g_pathCount = 0;
+                        NotePath(g_seedFrom);
+                    }
+                    NotePath(next.pos);
                 }
-                NotePath(next.pos);
             } else {
                 g_pathCount = 0;
             }
@@ -3317,7 +3346,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.39, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.40, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3363,7 +3392,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.39";
+    d.version = "0.25.40";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

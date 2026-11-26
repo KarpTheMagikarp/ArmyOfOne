@@ -943,6 +943,37 @@ def test_save_stays_off_on_a_moving_piece_of_the_level():
     assert "if (OnMovingPiece(at)) return;" in remember
 
 
+def test_save_waits_out_a_platforms_trip_in_free_roam_time():
+    """
+    Palumpolum Ch 7, Nov 26: the ray loses a platform once its leg starts, so
+    pauses mid-ride read nothing under her and a save there floated her on
+    load. A ray latch didn't work either, that level calls half its plain floor
+    movable. So a script moving a piece once she's been in free roam holds Save
+    for 20 s of free roam, which a pause doesn't run down, and a load's own
+    posing of the pieces doesn't count. The lift and scene latches still clear
+    the same, only the trail and walk-in path skip the trip
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr ULONGLONG kPieceTripMs = 20000;" in source
+    bg = source[source.index("int __fastcall BgAnimHook("):]
+    bg = bg[:bg.index("\n}\n")]
+    assert bg.index("if (kept) {") < bg.index("if (g_roamedThisField) {") < bg.index("g_pieceTripMs = kPieceTripMs;")
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    roam = tick[tick.index("if (state == kStateFieldIdle) {"):tick.index("} else {")]
+    assert "g_roamedThisField = true;" in roam
+    assert "g_pieceTripMs -= std::min(g_pieceTripMs, now - g_roamAt);" in roam
+    field = tick[tick.index("if (state == 1 || state == 2) {"):]
+    field = field[:field.index("g_restartPoint = false;")]
+    assert "g_pieceTripMs = 0;" in field and "g_roamedThisField = false;" in field
+    walked = tick[tick.index("if (Steady(rise) && !carried && g_idleSolid && offRide) {"):]
+    walked = walked[:walked.index("} else {\n                g_pathCount = 0;")]
+    assert walked.index("g_rode = false;") < walked.index("if (g_pieceTripMs) {")
+    assert walked.index("g_seedPath = false;") < walked.index("Remember(next.pos)")
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert withheld.index("if (g_rode)") < withheld.index("if (g_pieceTripMs)") < withheld.index("if (!g_idleSolid")
+
 def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     """
     every load ends 1.6 to 1.8 m forward of where it set her down, a station's
@@ -992,7 +1023,7 @@ def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on
     assert "walk.at[walk.count++] = spot;" in find
     # crumbs only on steady ground off any ride, and the path restarts with the trail
     tick = source[source.index("void Tick() {"):]
-    assert "NotePath(next.pos);\n            } else {\n                g_pathCount = 0;" in tick
+    assert "NotePath(next.pos);\n                }\n            } else {\n                g_pathCount = 0;" in tick
     import re
     resets = re.findall(r"\n( +)g_trailCount = 0;\n( +)(\w+)", source)
     assert resets and all(a == b and name == "g_pathCount" for a, b, name in resets)
