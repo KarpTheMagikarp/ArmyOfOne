@@ -419,6 +419,11 @@ int g_savedTrailCount = 0;
 // where she came from on the way to the spot, if it's a straight walk in
 bool g_savedApproach = false;
 Vec4 g_savedFrom{};
+// where a load of ours set her down, to start the next path from: she stood
+// there, and the ease-in walks her the rest. A save straight after a load has
+// nothing else behind it
+std::atomic<bool> g_seedPath{false};
+Vec4 g_seedFrom{};
 SavePoint g_savedPoint{};
 int g_lastState = -1;
 void* g_leadPad = nullptr;
@@ -1393,10 +1398,12 @@ void NotePath(const Vec4& at) {
 
 bool OnMovingPiece(const Vec4& at);
 
-// a crumb 1.85 to 2.5 m back from the spot that she walked in from in a
+// a crumb 1.74 to 2.5 m back from the spot that she walked in from in a
 // straight line: every crumb after it closer to the spot and within 40 cm of
 // the line, and the newest one on the spot. That's where a load can start her
-// for the ease-in to carry her onto it
+// for the ease-in to carry her onto it. 1.74 covers a save made straight after
+// a load, whose own ease-in is all the path there is (1.75 to 1.81 m, Ch 3,
+// Nov 25), and 1.2 m of height a slope she ran down to it (one did 0.7)
 bool FindApproach(const Vec4& spot, Vec4& from) {
     if (g_pathCount < 2) return false;
     const auto at = [](int back) -> const Vec4& { return g_path[(g_pathNext - 1 - back + 2 * kPathLength) % kPathLength]; };
@@ -1405,8 +1412,8 @@ bool FindApproach(const Vec4& spot, Vec4& from) {
     for (int back = 1; back < g_pathCount; ++back) {
         const Vec4& c = at(back);
         const float d = flat(c, spot);
-        if (d < 1.85f) continue;
-        if (d > 2.5f || std::fabs(c.v[1] - spot.v[1]) > 0.6f || OnMovingPiece(c)) return false;
+        if (d < 1.74f) continue;
+        if (d > 2.5f || std::fabs(c.v[1] - spot.v[1]) > 1.2f || OnMovingPiece(c)) return false;
         const float ux = (spot.v[0] - c.v[0]) / d, uz = (spot.v[2] - c.v[2]) / d;
         float lastAlong = 0;
         for (int k = back - 1; k >= 0; --k) {
@@ -1509,7 +1516,9 @@ void DumpActor() {
 // lands on it. A matrix with no heading left in it keeps the station's. With
 // a walk in on file she faces along it and the marker goes kEaseInTo ahead,
 // and the height is the walk in's where she'll start: on a slope the spot's
-// own would put her in the ground walking down to it and drop her walking up
+// own would put her in the ground walking down to it and drop her walking up.
+// Plus a bit on a slope, where her matrix walks lower than she stands: up one
+// in Ch 3 she started 0.39 m into it and got pushed out (Nov 25)
 Matrix SpawnMatrix(const Matrix& saved, const float* station, bool approach = false, const Vec4& from = {}) {
     Matrix out = saved;
     float fx = saved.m[8], fz = saved.m[10];
@@ -1520,7 +1529,8 @@ Matrix SpawnMatrix(const Matrix& saved, const float* station, bool approach = fa
         step = kEaseInTo;
         const float d = std::max(std::hypot(fx, fz), 1e-3f);
         const float t = std::clamp((d - (kEaseInFrom - kEaseInTo)) / d, 0.0f, 1.0f);
-        y = from.v[1] + t * (saved.m[13] - from.v[1]);
+        const float slope = std::fabs(saved.m[13] - from.v[1]) / d;
+        y = from.v[1] + t * (saved.m[13] - from.v[1]) + std::min(0.4f, 1.6f * slope);
     }
     float len = std::hypot(fx, fz);
     if (len < 0.2f) {
@@ -2189,6 +2199,9 @@ int __fastcall MarkerLookupHook(void* manager, void* edx, int marker, float* out
     if (g_spawn.answered == 0) {
         g_stationPos = station;
         g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0, g_spawn.approach, g_spawn.from);
+        const float* m = g_spawn.matrix.m;
+        g_seedFrom = {{m[12] - kEaseInFrom * m[8], m[13] + kSpawnRise, m[14] - kEaseInFrom * m[10], 1.0f}};
+        g_seedPath = true;
     }
     float delta[3];
     for (int i = 0; i < 3; ++i) delta[i] = g_spawn.matrix.m[12 + i] - station.v[i];
@@ -2564,6 +2577,10 @@ void Tick() {
                         next.pos.v[1], next.pos.v[2]);
                 g_rode = false;
                 if (g_sanctioned.story >= 0) Remember(next.pos);
+                if (g_seedPath.exchange(false)) {
+                    g_pathCount = 0;
+                    NotePath(g_seedFrom);
+                }
                 NotePath(next.pos);
             } else {
                 g_pathCount = 0;
@@ -3134,7 +3151,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.33, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.34, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3180,7 +3197,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.33";
+    d.version = "0.25.34";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

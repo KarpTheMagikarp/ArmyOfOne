@@ -981,7 +981,8 @@ def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on
     find = source[source.index("bool FindApproach(const Vec4& spot, Vec4& from) {"):]
     find = find[:find.index("\n}\n")]
     assert "if (flat(at(0), spot) > 0.5f) return false;" in find
-    assert "if (d > 2.5f || std::fabs(c.v[1] - spot.v[1]) > 0.6f || OnMovingPiece(c)) return false;" in find
+    assert "if (d < 1.74f) continue;" in find
+    assert "if (d > 2.5f || std::fabs(c.v[1] - spot.v[1]) > 1.2f || OnMovingPiece(c)) return false;" in find
     assert "if (side > 0.4f || along < lastAlong - 0.1f) return false;" in find
     # crumbs only on steady ground off any ride, and the path restarts with the trail
     tick = source[source.index("void Tick() {"):]
@@ -996,7 +997,13 @@ def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on
     spawn = source[source.index("Matrix SpawnMatrix("):]
     spawn = spawn[:spawn.index("\n}\n")]
     # height taken off the walk in where she starts, not the spot's
-    assert "step = kEaseInTo;" in spawn and "y = from.v[1] + t * (saved.m[13] - from.v[1]);" in spawn
+    assert "step = kEaseInTo;" in spawn
+    assert "y = from.v[1] + t * (saved.m[13] - from.v[1]) + std::min(0.4f, 1.6f * slope);" in spawn
+    # and a load seeds the next path with where it set her down
+    hook = source[source.index("int __fastcall MarkerLookupHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "g_seedPath = true;" in hook
+    assert "if (g_seedPath.exchange(false)) {" in source
     assert "out.m[13] = y - kSpawnRise;" in spawn
     # a spot AvoidLostSpots moved isn't the one she walked in to
     arm = source[source.index("void TryArm(int marker) {"):]
