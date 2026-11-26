@@ -2237,6 +2237,8 @@ def test_the_art_fades_with_the_clip_and_doesnt_slide():
     assert "transition:opacity calc(.36s * var(--pace)) ease" in stage and "transform" not in stage
     assert "transition:opacity calc(.36s * var(--pace)) ease;background:#0a0e12}" in ui
     assert "body.m2 #artStage{opacity:0}" in ui
+    # the banners frame it top and bottom, so nothing fades it there
+    assert "mask-image" not in stage
 
 
 def test_the_q_e_name_comes_in_on_the_paths_slide():

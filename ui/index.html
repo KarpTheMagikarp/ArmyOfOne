@@ -631,12 +631,11 @@ body.m2 #pathStat{opacity:1;transform:none;pointer-events:auto}
 .sect.on .row{opacity:1;transform:none;transition-delay:calc(var(--i,0) * var(--beat))}
 
 /* the character art, which is the start page's alone */
+/* the left fade is baked into the art. No top or bottom one: the stage runs
+   banner to banner, so they're its edges, and a fade there only washed the
+   wallpaper out against them */
 #artStage{position:absolute;right:0;top:0;bottom:0;width:66%;
   overflow:hidden;pointer-events:none;z-index:1;
-  /* the left fade is baked into the art; this softens top and bottom so the
-     wallpaper does not sit on a hard cut against the fog */
-  -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 6%, #000 90%, transparent 100%);
-  mask-image:linear-gradient(to bottom, transparent 0, #000 6%, #000 90%, transparent 100%);
   transition:opacity calc(.36s * var(--pace)) ease}
 /* part of the picture the clip fades over, so it goes the way the fog does,
    in place on #cinema's own fade, and back on it. It slid off right for a
