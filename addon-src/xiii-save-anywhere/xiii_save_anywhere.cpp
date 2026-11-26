@@ -1917,6 +1917,22 @@ bool CanSave() {
     return g_findSavePointRow() != nullptr && PlayerHandle() != 0xFFFFFFFF;
 }
 
+// Debug only, at each pause: what the ray world has between her waist and
+// her head. 0.25.35 to 0.25.38 kept Save off and marked the landing when
+// anything was there, and after every load on 0.25.38 something with a flat
+// underside sat 0.4 m over her and flagged two landings that were dead on.
+// So a landing's judged by her height alone, and this says what that is
+void LogOverHer(const Vec4& at) {
+    void* world = *reinterpret_cast<void**>(g_base + kGroundWorldRva);
+    if (!world) return;
+    alignas(16) const float from[4] = {at.v[0], at.v[1] + 1.5f, at.v[2], 1.0f};
+    alignas(16) const float to[4] = {at.v[0], at.v[1] + 0.6f, at.v[2], 1.0f};
+    alignas(16) float hit[16]{};
+    // the hit's point is dwords 1 to 3 and its normal 5 to 7
+    if (reinterpret_cast<GroundRayFn>(g_base + kGroundRayRva)(world, nullptr, from, to, hit, kNotFloorLayers) & 0xFF)
+        Log("  over her: %.2f %.2f %.2f facing %.2f %.2f %.2f", hit[1], hit[2], hit[3], hit[5], hit[6], hit[7]);
+}
+
 // Debug only, at each pause: which collision layers the engine's ray finds
 // under her, one bit at a time, to keep checking the Save gate's layers
 // against spots that load and spots that drop her as testing moves through
@@ -1950,6 +1966,7 @@ void SurveyLayers(const Vec4& at) {
         }
     }
     Log("%s", line);
+    LogOverHer(at);
 }
 
 // standing on something the level moves: the same ray through the half metre
@@ -1962,19 +1979,6 @@ bool OnMovingPiece(const Vec4& at) {
     if (!world) return false;
     alignas(16) const float from[4] = {at.v[0], at.v[1] + 0.5f, at.v[2], 1.0f};
     alignas(16) const float to[4] = {at.v[0], at.v[1] - 0.5f, at.v[2], 1.0f};
-    alignas(16) float hit[16]{};
-    return reinterpret_cast<GroundRayFn>(g_base + kGroundRayRva)(world, nullptr, from, to, hit, kNotFloorLayers) & 0xFF;
-}
-
-// set into something she should be standing on: a floor in the same world
-// between her waist and her head. Walking, her matrix sits up to 0.4 under
-// the floor it's on (Ch 3, Nov 26), so 0.6 up is clear of that. The load that
-// put her into Lake Bresha's ice had it 1.03 over her
-bool UnderFloor(const Vec4& at) {
-    void* world = *reinterpret_cast<void**>(g_base + kGroundWorldRva);
-    if (!world) return false;
-    alignas(16) const float from[4] = {at.v[0], at.v[1] + 1.5f, at.v[2], 1.0f};
-    alignas(16) const float to[4] = {at.v[0], at.v[1] + 0.6f, at.v[2], 1.0f};
     alignas(16) float hit[16]{};
     return reinterpret_cast<GroundRayFn>(g_base + kGroundRayRva)(world, nullptr, from, to, hit, kNotFloorLayers) & 0xFF;
 }
@@ -2025,7 +2029,6 @@ const char* Withheld() {
     // last, being calls into the engine
     Vec4 at{};
     if (!Position(PlayerHandle(), at)) return nullptr;
-    if (UnderFloor(at)) return "she's inside the floor she should be standing on, and that's no spot to load into";
     if (OnMovingPiece(at))
         return "she's standing on something the level moves (a lift, the slab beside one), which a load can't set "
                "her back on";
@@ -2369,7 +2372,7 @@ void TickLoad(int state) {
         Log("landed at %.2f %.2f %.2f, %.2f across and %.2f up from where it aimed", at.v[0], at.v[1], at.v[2], flat,
             at.v[1] - g_landTarget.v[1]);
         // no fall, but not on it either: into the floor, where Save's off and the next load shouldn't go
-        if (drop > 0.3f || UnderFloor(at)) {
+        if (drop > 0.3f) {
             Log("that's inside the floor at the spot, not on it");
             LoseSpot(g_loadedSlot, g_landTarget);
             Log("slot %d's next load starts on ground she walked, off that stretch", g_loadedSlot);
@@ -3314,7 +3317,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.38, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.39, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3360,7 +3363,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.38";
+    d.version = "0.25.39";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

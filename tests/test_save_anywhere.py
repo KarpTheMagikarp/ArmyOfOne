@@ -1068,22 +1068,22 @@ def test_the_ease_in_is_held_to_the_heights_she_walked_in_at():
     assert "if (g_setMatrix && (g_holding || (g_heightTraceUntil && now < g_heightTraceUntil))) {" in tick
 
 
-def test_inside_the_floor_is_no_spot_to_save_or_land_on():
+def test_a_landing_under_the_spot_is_marked_like_a_drop():
     """
     a load that set her into the ice still offered Save on the spot, and the
-    save straight after it loaded under the level too. A floor between her
-    waist and her head means she's in it: Save stays off, and a landing like
-    that marks the spot the way a drop does
+    save straight after it loaded under the level too. A landing more than
+    30 cm under the spot marks it the way a drop does. Her height alone: a
+    ray for a floor over her flagged two landings that were dead on, since
+    after a load something with a flat underside sits right over her
+    (0.25.38, Nov 26), so that ray's Debug logging only
     """
     source = SOURCE.read_text(encoding="utf-8")
-    under = source[source.index("bool UnderFloor(const Vec4& at) {"):]
-    under = under[:under.index("\n}\n")]
-    assert "at.v[1] + 1.5f" in under and "at.v[1] + 0.6f" in under and "kNotFloorLayers" in under
-    withheld = source[source.index("const char* Withheld() {"):]
-    withheld = withheld[:withheld.index("\n}\n")]
-    assert withheld.index("if (UnderFloor(at))") < withheld.index("if (OnMovingPiece(at))")
+    assert "UnderFloor" not in source
     land = source[source.index("void TickLoad(int state) {"):]
     land = land[:land.index("\n}\n")]
-    assert "if (drop > 0.3f || UnderFloor(at)) {" in land
-    after = land[land.index("if (drop > 0.3f || UnderFloor(at)) {"):]
+    assert "if (drop > 0.3f) {" in land
+    after = land[land.index("if (drop > 0.3f) {"):]
     assert after.index("LoseSpot(g_loadedSlot, g_landTarget);") < after.index("g_lostLanding = true;")
+    survey = source[source.index("void SurveyLayers(const Vec4& at) {"):]
+    survey = survey[:survey.index("\n}\n")]
+    assert "LogOverHer(at);" in survey
