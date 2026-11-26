@@ -855,6 +855,7 @@ void ForgetWorld(const char* why) {
     const size_t had = g_world.size();
     g_world.clear();
     g_fieldAnimates = false;
+    g_holding = false;
     g_worldZone = ZoneNumber();
     // the charas and talk changes of a field that's gone are gone with it.
     // What the new field's own setup does from here still counts
@@ -3191,8 +3192,7 @@ bool HookAt(DWORD rva, Fn detour, Fn& original) {
 
 void LetGo(const float* at, const char* why) {
     g_holding = false;
-    Log("held the ease-in to her walk in for %d frames, let go at %.2f %.2f %.2f (%s)", g_holdFrames, at[0], at[1], at[2],
-        why);
+    Log("let go of her at %.2f %.2f %.2f after %d frames (%s)", at[0], at[1], at[2], g_holdFrames, why);
 }
 
 // the controller's write of her through the ease-in, at the height she walked
@@ -3203,12 +3203,25 @@ void LetGo(const float* at, const char* why) {
 // the ice, up one 0.2, and she walked out under the level (Nov 26). False
 // once it lets go, and then the write goes through untouched
 bool HoldToWalk(const float* m, float* out) {
+    const Vec4& spot = g_holdWalk.at[g_holdWalk.count - 1];
     float side = 0, left = 0;
-    const float y = WalkHeight(g_holdWalk, m[12], m[14], &side, &left);
-    // the stick: past here it's her walking, not the ease-in
-    const bool walkedOff = side > 0.5f || left < -0.5f;
-    if (walkedOff || GetTickCount64() > g_holdUntil) {
-        LetGo(m + 12, walkedOff ? "she walked off it" : "ran out of time");
+    float y = WalkHeight(g_holdWalk, m[12], m[14], &side, &left);
+    if (g_holdAtSpot >= 3) {
+        // and on the spot till she walks off it. Standing, it settles her
+        // toward the floor under where it eased her to, so letting go there
+        // sank her 1.38 m into a wave she'd walked up (0.25.36, Nov 26).
+        // Walking follows the floor she's on
+        y = spot.v[1];
+        if (std::hypot(m[12] - spot.v[0], m[14] - spot.v[2]) > 0.3f) {
+            LetGo(m + 12, "she walked off the spot");
+            return false;
+        }
+    } else if (side > 0.5f || left < -0.5f) {
+        // the stick: past here it's her walking, not the ease-in
+        LetGo(m + 12, "she walked off the walk in");
+        return false;
+    } else if (GetTickCount64() > g_holdUntil) {
+        LetGo(m + 12, "the ease-in never got her to the spot");
         return false;
     }
     std::memcpy(out, m, 16 * sizeof(float));
@@ -3223,7 +3236,9 @@ bool HoldToWalk(const float* m, float* out) {
     }
     ++g_holdFrames;
     // a few writes on the spot, so its own last step down to it is ours too
-    if (left <= 0.02f && ++g_holdAtSpot >= 3) LetGo(out + 12, "on the spot");
+    if (g_holdAtSpot < 3 && left <= 0.02f && ++g_holdAtSpot == 3)
+        Log("held the ease-in to her walk in for %d frames, on the spot at %.2f %.2f %.2f till she moves", g_holdFrames,
+            out[12], out[13], out[14]);
     return true;
 }
 
@@ -3272,7 +3287,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.35, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.36, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3318,7 +3333,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.35";
+    d.version = "0.25.36";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

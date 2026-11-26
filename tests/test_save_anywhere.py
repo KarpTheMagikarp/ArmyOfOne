@@ -1033,15 +1033,23 @@ def test_the_ease_in_is_held_to_the_heights_she_walked_in_at():
     assert "if (g_holding && from == kControllerWriteRva && HoldToWalk(m, held)) m = held;" in hook
     hold = source[source.index("bool HoldToWalk(const float* m, float* out) {"):]
     hold = hold[:hold.index("\n}\n")]
-    assert "const float y = WalkHeight(g_holdWalk, m[12], m[14], &side, &left);" in hold
+    assert "float y = WalkHeight(g_holdWalk, m[12], m[14], &side, &left);" in hold
     assert "out[13] = y;" in hold
     # its own numbers only, so a write that isn't it is left alone
     assert "if (std::fabs(at[0] - m[12]) < 0.01f && std::fabs(at[2] - m[14]) < 0.01f) {" in hold
     assert "*reinterpret_cast<float*>(ctrl + kControllerAimY) = y;" in hold
-    # and it always lets go: on the spot, off the line, or out of time
-    assert "const bool walkedOff = side > 0.5f || left < -0.5f;" in hold
-    assert "GetTickCount64() > g_holdUntil" in hold
-    assert 'if (left <= 0.02f && ++g_holdAtSpot >= 3) LetGo(out + 12, "on the spot");' in hold
+    # it lets go off the line or out of time on the way, and once it's on the
+    # spot only when she walks off it: let go standing, the controller settled
+    # her 1.38 m into the wave she'd walked up (0.25.35, Nov 26)
+    assert "} else if (side > 0.5f || left < -0.5f) {" in hold
+    assert "} else if (GetTickCount64() > g_holdUntil) {" in hold
+    pinned = hold[hold.index("if (g_holdAtSpot >= 3) {"):hold.index("} else if (side")]
+    assert "y = spot.v[1];" in pinned
+    assert "if (std::hypot(m[12] - spot.v[0], m[14] - spot.v[2]) > 0.3f) {" in pinned
+    assert "if (g_holdAtSpot < 3 && left <= 0.02f && ++g_holdAtSpot == 3)" in hold
+    # and a field that's gone takes the hold with it, so it can't catch the next leader
+    forget = source[source.index("void ForgetWorld(const char* why) {"):]
+    assert "g_holding = false;" in forget[:forget.index("\n}\n")]
     tick = source[source.index("void Tick() {"):]
     assert "if (g_landCheckAt && g_setMatrix && g_holdWalk.count >= 2) {" in tick
     assert "g_holdUntil = now + 5000;" in tick
