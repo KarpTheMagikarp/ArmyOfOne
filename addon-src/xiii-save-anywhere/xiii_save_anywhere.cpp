@@ -97,6 +97,17 @@ constexpr DWORD kGetStateRva = 0x417850;        // ZoneStateMachine::GetState, t
 constexpr unsigned char kGetStateHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08, 0x89, 0x4D, 0xF8, 0x6A, 0x00};
 constexpr DWORD kZoneFireRva = 0x40D070;        // Zone::FireTrigger, thiscall(trigger)
 constexpr unsigned char kZoneFireHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08, 0x89, 0x4D, 0xF8, 0x8B, 0x45, 0xF8};
+// the app's own state machine, the one above every zone: [AppGame+0x36C],
+// thiscall fire(trigger, 0, context), and its state at [[+0x230]+4]. The
+// title's Load Game is its trigger 8, straight into the load list, and the
+// only way from a field to the title is the pause screen's own Quit: no zone
+// state leads to the load list (the app's table, 0x43E760)
+constexpr DWORD kAppGameRva = 0x241C9BC, kAppFireRva = 0x43E6E0, kAppFireContext = 0x2402B98;
+constexpr unsigned char kAppFireHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x60, 0x89, 0x4D, 0xA0, 0x8B, 0x45, 0x10};
+// mov eax, [AppGame] in the save state's task, to check that address is still it
+constexpr DWORD kAppGameReadRva = 0x410E64;
+constexpr unsigned char kAppGameReadHead[] = {0xA1, 0xBC, 0xC9, 0x81, 0x02};
+constexpr int kAppTitle = 4, kAppLoadList = 15, kAppTrgLoad = 8;
 constexpr DWORD kGetSavePointRva = 0x728EE0;    // cdecl(out 16 bytes)
 constexpr unsigned char kGetSavePointHead[] = {0x55, 0x8B, 0xEC, 0x8B, 0x45, 0x08, 0x50, 0xE8};
 constexpr DWORD kFindSavePointRowRva = 0x43D9C0;  // cdecl(), the r_savepoint row a load spawns from, or null
@@ -337,6 +348,7 @@ bool InScene(int state) {
 constexpr DWORD kPadHeld = 0x24, kPadPressed = 0x2C, kPadRepeat = 0x34, kPadRepeatToo = 0x38;
 
 using PadUpdateFn = void(__fastcall*)(void*, void*, void*);
+using AppFireFn = void(__fastcall*)(void*, void*, int, int, void*);
 using GetStateFn = int(__fastcall*)(void*, void*);
 using ZoneFireFn = void(__fastcall*)(void*, void*, int);
 using GetSavePointFn = void(__cdecl*)(void*);
@@ -369,6 +381,7 @@ void** g_fieldStart = nullptr;
 TextThisFn g_textCtor = nullptr, g_textDtor = nullptr;
 GetStateFn g_getState = nullptr;
 ZoneFireFn g_zoneFire = nullptr;
+AppFireFn g_appFire = nullptr;
 GetSavePointFn g_getSavePoint = nullptr;
 FindSavePointRowFn g_findSavePointRow = nullptr;
 ResolveActorFn g_resolveActor = nullptr;
@@ -387,6 +400,14 @@ unsigned char** g_menu = nullptr;
 std::atomic<bool> g_enabled{true};
 int g_button = 4;
 bool g_prompt = true;
+// Load on the pause bar: the game's own Quit, then the title's load list
+bool g_loadOn = true;
+int g_loadButton = 6;
+char g_loadLabel[32]{};
+enum class LoadStep { Off, Quitting, Title };
+LoadStep g_loadStep = LoadStep::Off;
+ULONGLONG g_loadAt = 0, g_titleAt = 0;
+bool g_loadPressed = false, g_pressBack = false, g_saveShown = false;
 
 struct SavePoint {
     unsigned char bytes[16];
@@ -500,6 +521,17 @@ void* StateMachine() {
 int State() {
     void* sm = StateMachine();
     return sm ? g_getState(sm, nullptr) : -1;
+}
+
+void* AppMachine() {
+    auto* app = *reinterpret_cast<unsigned char**>(g_base + kAppGameRva);
+    return app ? *reinterpret_cast<void**>(app + 0x36C) : nullptr;
+}
+
+int AppState() {
+    auto* machine = static_cast<unsigned char*>(AppMachine());
+    auto* inner = machine ? *reinterpret_cast<unsigned char**>(machine + 0x230) : nullptr;
+    return inner ? *reinterpret_cast<int*>(inner + 4) : -1;
 }
 
 DWORD PlayerHandle() {
@@ -2396,9 +2428,13 @@ void TickLoad(int state) {
 // its own last state so a hold is one press
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, void*);
 XInputGetStateFn g_xinputGetState = nullptr;
-int g_saveKey = 'E';
-bool g_keyWas = false;
-bool g_padWas[4]{};
+struct RawButton {
+    int key;
+    int bit;
+    bool keyWas = false;
+    bool padWas[4]{};
+};
+RawButton g_rawSave{'E', 4}, g_rawLoad{'Q', 6};
 int g_padIdle[4]{};
 int g_sourceLines = 0;
 
@@ -2440,14 +2476,14 @@ bool GameHasFocus() {
 // a fresh press from the keyboard or an XInput pad, or what's still held,
 // read only on the pause screen and while saving: XInputGetState on an empty
 // slot is slow, so it's never polled out in the field
-const char* RawPress(bool& held) {
+const char* RawPress(RawButton& button, bool& held) {
     const char* source = nullptr;
     held = false;
-    const bool key = GameHasFocus() && (GetAsyncKeyState(g_saveKey) & 0x8000);
-    if (key && !g_keyWas) source = "keyboard";
+    const bool key = GameHasFocus() && (GetAsyncKeyState(button.key) & 0x8000);
+    if (key && !button.keyWas) source = "keyboard";
     held = held || key;
-    g_keyWas = key;
-    const WORD want = XInputBit(g_button);
+    button.keyWas = key;
+    const WORD want = XInputBit(button.bit);
     for (DWORD user = 0; want && g_xinputGetState && user < 4; ++user) {
         // an empty slot costs real time to ask about, so one that came back
         // empty is left a couple of seconds before it's asked again
@@ -2459,9 +2495,9 @@ const char* RawPress(bool& held) {
         const DWORD result = g_xinputGetState(user, &state);
         if (result == ERROR_DEVICE_NOT_CONNECTED) g_padIdle[user] = 120;
         const bool down = result == ERROR_SUCCESS && (state.buttons & want);
-        if (down && !g_padWas[user] && !source) source = "controller";
+        if (down && !button.padWas[user] && !source) source = "controller";
         held = held || down;
-        g_padWas[user] = down;
+        button.padWas[user] = down;
     }
     return source;
 }
@@ -2563,11 +2599,53 @@ int g_pauseLooks = 0;
 int g_idLines = 0;
 void LogSlots(const char* when);
 
+// Load is the pause screen's own Quit, its confirm box and all, since
+// everything after a load is the game's anyway and losing what you haven't
+// saved is the same either way. Then once the title's up, its Load Game
+void StartLoad(const char* source) {
+    Log("load pressed (%s): the game's own Quit, then the load list", source);
+    g_pressBack = true;
+    g_loadStep = LoadStep::Quitting;
+    g_loadAt = GetTickCount64();
+}
+
+void TickLoadList(int state) {
+    if (g_loadStep == LoadStep::Off) return;
+    const ULONGLONG now = GetTickCount64();
+    const int app = AppState();
+    if (g_loadStep == LoadStep::Quitting) {
+        // No on the box, then Resume
+        if (state == kStateFieldIdle || now - g_loadAt > 60000) {
+            Log("load called off, still in the field");
+            g_loadStep = LoadStep::Off;
+        } else if (app == kAppTitle) {
+            Log("at the title %llu ms after Load", now - g_loadAt);
+            g_loadStep = LoadStep::Title;
+            g_titleAt = now;
+        }
+        return;
+    }
+    if (app != kAppTitle) {
+        Log("left the title before its load list (app state %d)", app);
+        g_loadStep = LoadStep::Off;
+    } else if (now - g_titleAt > 1000) {
+        // a beat for the title to come up, so its own task isn't caught halfway
+        if (void* machine = AppMachine())
+            g_appFire(machine, nullptr, kAppTrgLoad, 0, reinterpret_cast<void*>(g_base + kAppFireContext));
+        Log("asked the title for its load list");
+        g_loadStep = LoadStep::Off;
+    }
+}
+
 void Tick() {
     const bool pressed = g_pressed;
     g_pressed = false;
     const int state = State();
     g_stateForFiles = state;
+    const bool loadPressed = g_loadPressed;
+    g_loadPressed = false;
+    // the title has no zone, so this goes before the return that needs one
+    TickLoadList(state);
     if (state < 0) return;
 
     const ULONGLONG now = GetTickCount64();
@@ -2868,10 +2946,10 @@ void Tick() {
 
     const bool watching = state == kStateFieldPause || g_phase != Phase::Idle;
     bool rawHeld = false;
-    const char* raw = watching ? RawPress(rawHeld) : nullptr;
+    const char* raw = watching ? RawPress(g_rawSave, rawHeld) : nullptr;
     // only with Save on the bar: with Quit's confirm box up, the Start we press
     // to resume would land on that instead
-    if (state == kStateFieldPause && g_phase == Phase::Idle && g_enabled && (g_decorated || !g_prompt) &&
+    if (state == kStateFieldPause && g_phase == Phase::Idle && g_enabled && ((g_decorated && g_saveShown) || !g_prompt) &&
         (pressed || raw)) {
         if (g_sourceLines < 6) {
             ++g_sourceLines;
@@ -2880,6 +2958,11 @@ void Tick() {
         if (const char* why = Withheld()) Log("save pressed, but %s", why);
         else StartSave();
     }
+    bool loadHeld = false;
+    const char* loadRaw = watching && g_loadOn ? RawPress(g_rawLoad, loadHeld) : nullptr;
+    if (state == kStateFieldPause && g_phase == Phase::Idle && g_enabled && g_loadOn && g_decorated &&
+        g_loadStep == LoadStep::Off && (loadPressed || loadRaw))
+        StartLoad(loadPressed ? "game pad mask" : loadRaw);
     // the press that started a save would otherwise land in the field as it
     // resumes, where Y opens the main menu. So from the save starting until
     // it's let go, and a beat after, that button's presses are eaten. Only
@@ -2974,7 +3057,8 @@ void __fastcall TextSetIdHook(unsigned char* text, void* edx, const char* id, in
             ? *reinterpret_cast<const char**>(text + 4) + *reinterpret_cast<short*>(text + 0xE)
             : nullptr;
         if (!bar) return;
-        std::snprintf(g_barLabel, sizeof g_barLabel, "%s   %s", g_saveLabel, bar);
+        std::snprintf(g_barLabel, sizeof g_barLabel, "%s%s%s%s%s", g_saveShown ? g_saveLabel : "",
+                      g_saveShown ? "   " : "", g_loadOn ? g_loadLabel : "", g_loadOn ? "   " : "", bar);
         g_textDtor(text, nullptr);
         g_textCtor(text, nullptr);
         *reinterpret_cast<const char**>(text + 4) = g_barLabel;
@@ -2994,8 +3078,12 @@ void __fastcall TextSetIdHook(unsigned char* text, void* edx, const char* id, in
 // station this save would load at in what's loaded
 void __fastcall PauseModeHook(unsigned char* widget, void* edx, int mode) {
     const int state = State();
-    const bool want = g_enabled && g_prompt && g_phase == Phase::Idle &&
-                      (state == kStateFieldPause || state == kStateFieldPauseWait) && !Withheld();
+    const bool field = g_enabled && g_prompt && g_phase == Phase::Idle &&
+                       (state == kStateFieldPause || state == kStateFieldPauseWait);
+    // Load goes wherever Quit does, since it is Quit with a stop at the load
+    // list. Save keeps its guard
+    g_saveShown = field && !Withheld();
+    const bool want = g_saveShown || (field && g_loadOn && g_loadStep == LoadStep::Off);
     if (want || g_decorated) *reinterpret_cast<int*>(widget + 0x70) = -1;
     g_relabel = want && mode != 0;
     g_relabelled = 0;
@@ -3012,7 +3100,8 @@ void __fastcall PauseModeHook(unsigned char* widget, void* edx, int mode) {
     g_decorated = g_relabelled == 1;
     if (logging) {
         ++g_pauseLogLines;
-        Trace("  relabelled %d, save %s", g_relabelled, g_decorated ? "shown" : "not shown");
+        Trace("  relabelled %d, save %s, load %s", g_relabelled, g_decorated && g_saveShown ? "shown" : "not shown",
+              g_decorated && g_loadOn ? "shown" : "not shown");
         LogSlots("set");
         g_pauseLooks = 2;
     }
@@ -3047,6 +3136,7 @@ void __fastcall PadUpdateHook(void* self, void* edx, void* arg) {
     if (!g_leadPad) g_leadPad = self;
     if (g_debug && g_lastState == kStateFieldPause && g_phase == Phase::Idle) LearnButtons(pad);
     if (g_swallow == 0) g_pressed = g_pressed || Pressed(pad);
+    g_loadPressed = g_loadPressed || ((Mask(pad, kPadPressed) >> g_loadButton) & 1);
     g_heldLastFrame = g_heldLastFrame || ((Mask(pad, kPadHeld) >> g_button) & 1);
     if (self == g_leadPad) {
         if (g_debug) {
@@ -3062,14 +3152,15 @@ void __fastcall PadUpdateHook(void* self, void* edx, void* arg) {
     }
     if (g_swallow > 0) Swallow(pad);
     // Start for one frame, held and pressed, on the pad the frame's logic
-    // runs on. Next frame the hardware says it's up and it reads as a tap
-    if (g_pressStart && self == g_leadPad) {
-        g_pressStart = false;
-        constexpr DWORD start = 1u << 15;
-        Mask(pad, kPadHeld) |= start;
-        Mask(pad, kPadPressed) |= start;
-        Mask(pad, kPadRepeat) |= start;
-        Mask(pad, kPadRepeatToo) |= start;
+    // runs on, or Back for Load's Quit. Next frame the hardware says it's up
+    // and it reads as a tap
+    if ((g_pressStart || g_pressBack) && self == g_leadPad) {
+        const DWORD tap = (g_pressStart ? 1u << 15 : 0) | (g_pressBack ? 1u << 14 : 0);
+        g_pressStart = g_pressBack = false;
+        Mask(pad, kPadHeld) |= tap;
+        Mask(pad, kPadPressed) |= tap;
+        Mask(pad, kPadRepeat) |= tap;
+        Mask(pad, kPadRepeatToo) |= tap;
     }
 }
 
@@ -3078,17 +3169,27 @@ void ReadSettings() {
     g_enabled = GetPrivateProfileIntW(L"SaveAnywhere", L"Enabled", 1, ini.c_str()) != 0;
     g_button = static_cast<int>(GetPrivateProfileIntW(L"SaveAnywhere", L"SaveButton", 4, ini.c_str()));
     if (g_button < 0 || g_button > 15) g_button = 4;
-    wchar_t key[8]{};
-    GetPrivateProfileStringW(L"SaveAnywhere", L"SaveKey", L"E", key, 8, ini.c_str());
     // one letter or digit, as printed on the key. Virtual key codes for those
     // are their uppercase ASCII
-    const wchar_t k = static_cast<wchar_t>(std::towupper(key[0]));
-    g_saveKey = (k >= L'A' && k <= L'Z') || (k >= L'0' && k <= L'9') ? k : 'E';
+    const auto keyFrom = [&](const wchar_t* name, wchar_t fallback) {
+        wchar_t key[8]{};
+        GetPrivateProfileStringW(L"SaveAnywhere", name, std::wstring(1, fallback).c_str(), key, 8, ini.c_str());
+        const wchar_t k = static_cast<wchar_t>(std::towupper(key[0]));
+        return (k >= L'A' && k <= L'Z') || (k >= L'0' && k <= L'9') ? static_cast<int>(k) : static_cast<int>(fallback);
+    };
+    g_rawSave = {keyFrom(L"SaveKey", L'E'), g_button};
+    g_loadOn = GetPrivateProfileIntW(L"SaveAnywhere", L"Load", 1, ini.c_str()) != 0;
+    g_loadButton = static_cast<int>(GetPrivateProfileIntW(L"SaveAnywhere", L"LoadButton", 6, ini.c_str()));
+    if (g_loadButton < 0 || g_loadButton > 15 || g_loadButton == g_button) g_loadButton = g_button == 6 ? 4 : 6;
+    g_rawLoad = {keyFrom(L"LoadKey", L'Q'), g_loadButton};
     g_prompt = GetPrivateProfileIntW(L"SaveAnywhere", L"Prompt", 1, ini.c_str()) != 0;
     g_debug = GetPrivateProfileIntW(L"SaveAnywhere", L"Debug", 0, ini.c_str()) != 0;
     const int glyph = GlyphFor(g_button);
     if (glyph >= 0) std::snprintf(g_saveLabel, sizeof g_saveLabel, "\xF1%cSave", 0x40 + glyph);
     else std::snprintf(g_saveLabel, sizeof g_saveLabel, "Save");
+    const int loadGlyph = GlyphFor(g_loadButton);
+    if (loadGlyph >= 0) std::snprintf(g_loadLabel, sizeof g_loadLabel, "\xF1%cLoad", 0x40 + loadGlyph);
+    else std::snprintf(g_loadLabel, sizeof g_loadLabel, "Load");
 }
 
 bool Matches(DWORD rva, const unsigned char* bytes, size_t size) {
@@ -3158,6 +3259,8 @@ bool Verify() {
         {kCharaSetOutRva, kLoaderHead, sizeof kLoaderHead},
         {kCharaInRva, kLoaderHead, sizeof kLoaderHead},
         {kCharaOutRva, kLoaderHead, sizeof kLoaderHead},
+        {kAppFireRva, kAppFireHead, sizeof kAppFireHead},
+        {kAppGameReadRva, kAppGameReadHead, sizeof kAppGameReadHead},
     };
     // SteamStub decrypts the code before the game's entry point, and NovaFix
     // loads us after that, but waiting on the bytes costs nothing if not
@@ -3175,6 +3278,7 @@ bool Verify() {
     }
     g_getState = reinterpret_cast<GetStateFn>(g_base + kGetStateRva);
     g_zoneFire = reinterpret_cast<ZoneFireFn>(g_base + kZoneFireRva);
+    g_appFire = reinterpret_cast<AppFireFn>(g_base + kAppFireRva);
     g_getSavePoint = reinterpret_cast<GetSavePointFn>(g_base + kGetSavePointRva);
     g_findSavePointRow = reinterpret_cast<FindSavePointRowFn>(g_base + kFindSavePointRowRva);
     g_resolveActor = reinterpret_cast<ResolveActorFn>(g_base + kResolveActorRva);
@@ -3317,7 +3421,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.39, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.26.0, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3352,7 +3456,8 @@ DWORD WINAPI Worker(LPVOID) {
         g_setMatrix = nullptr;
         Log("couldn't hook her matrix, loads won't hold the ease-in to where she walked");
     }
-    Log("ready, save is button %d or the %c key%s", g_button, g_saveKey, g_xinputGetState ? "" : " (no XInput)");
+    Log("ready, save is button %d or the %c key, load %s%d or the %c key%s", g_button, g_rawSave.key,
+        g_loadOn ? "button " : "off, button ", g_loadButton, g_rawLoad.key, g_xinputGetState ? "" : " (no XInput)");
     return 0;
 }
 
@@ -3363,7 +3468,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.39";
+    d.version = "0.26.0";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

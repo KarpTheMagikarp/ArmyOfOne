@@ -63,6 +63,8 @@ SITES = (
     ("chara set out", 0x48070, 9),
     ("chara in", 0x475F0, 9),
     ("chara out", 0x47FC0, 9),
+    ("app trigger", 0x43E6E0, 12),
+    ("app pointer", 0x410E64, 5),
 )
 
 

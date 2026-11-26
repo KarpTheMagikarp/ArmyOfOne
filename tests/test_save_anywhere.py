@@ -118,10 +118,12 @@ def test_revert_takes_the_log_the_addon_writes():
 def test_the_shipped_ini_says_what_the_addon_reads():
     text = (ASSETS / "xiii-save-anywhere.ini").read_text(encoding="utf-8")
     source = SOURCE.read_text(encoding="utf-8")
-    for key, default in (("Enabled", "1"), ("SaveButton", "4"), ("Prompt", "1"), ("Debug", "0")):
+    for key, default in (("Enabled", "1"), ("SaveButton", "4"), ("Load", "1"), ("LoadButton", "6"), ("Prompt", "1"),
+                         ("Debug", "0")):
         assert f"\n{key}={default}\n" in text
         assert f'L"{key}", {default},' in source
-    assert "\nSaveKey=E\n" in text and 'L"SaveKey", L"E",' in source
+    assert "\nSaveKey=E\n" in text and "keyFrom(L\"SaveKey\", L'E')" in source
+    assert "\nLoadKey=Q\n" in text and "keyFrom(L\"LoadKey\", L'Q')" in source
     assert "[SaveAnywhere]" in text and 'L"SaveAnywhere"' in source
 
 
@@ -412,8 +414,10 @@ def test_it_only_acts_in_free_roam_and_its_pause_never_in_a_fight():
            "              kStateSave = 60;" in source
     fire = source.index("g_zoneFire(Zone(), nullptr, kTrgSaveReq);")
     assert "if (state == kStateFieldIdle) {" in source[fire - 600:fire]
-    assert "if (state == kStateFieldPause && g_phase == Phase::Idle && g_enabled && (g_decorated || !g_prompt)" \
+    assert "if (state == kStateFieldPause && g_phase == Phase::Idle && g_enabled && ((g_decorated && g_saveShown) || !g_prompt)" \
         in source
+    # Load takes the same pause, with the bar up so its Back lands on the bar
+    assert "if (state == kStateFieldPause && g_phase == Phase::Idle && g_enabled && g_loadOn && g_decorated &&" in source
 
 
 def test_a_scene_is_any_event_state_and_a_plain_fight_isnt():
@@ -1087,3 +1091,36 @@ def test_a_landing_under_the_spot_is_marked_like_a_drop():
     survey = source[source.index("void SurveyLayers(const Vec4& at) {"):]
     survey = survey[:survey.index("\n}\n")]
     assert "LogOverHer(at);" in survey
+
+
+def test_load_is_the_games_own_quit_then_the_titles_load_list():
+    """
+    no zone state leads to the load list, the app's table only goes title to
+    load (trigger 8), and the field only gets to the title through the pause
+    screen's Quit. So Load taps Back on the bar, the player answers the game's
+    own confirm box, and once the title's been up a beat it's asked for its
+    load list. The app machine gets that one trigger and nothing else
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr DWORD kAppGameRva = 0x241C9BC, kAppFireRva = 0x43E6E0, kAppFireContext = 0x2402B98;" in source
+    assert "constexpr int kAppTitle = 4, kAppLoadList = 15, kAppTrgLoad = 8;" in source
+    fired = [line.strip() for line in source.splitlines() if "g_appFire(" in line]
+    assert fired == ["g_appFire(machine, nullptr, kAppTrgLoad, 0, reinterpret_cast<void*>(g_base + kAppFireContext));"]
+    step = source[source.index("void TickLoadList(int state) {"):]
+    step = step[:step.index("\n}\n")]
+    assert step.index("if (app != kAppTitle) {") < step.index("g_appFire(")
+    assert "now - g_titleAt > 1000" in step
+    # called off by Resume, or by a minute passing in the field
+    assert "if (state == kStateFieldIdle || now - g_loadAt > 60000) {" in step
+    start = source[source.index("void StartLoad(const char* source) {"):]
+    assert "g_pressBack = true;" in start[:start.index("\n}\n")]
+    pad = source[source.index("void __fastcall PadUpdateHook("):]
+    pad = pad[:pad.index("\n}\n")]
+    assert "(g_pressBack ? 1u << 14 : 0)" in pad
+    # it runs before the return that needs a zone, since the title hasn't one
+    tick = source[source.index("void Tick() {"):]
+    assert tick.index("TickLoadList(state);") < tick.index("if (state < 0) return;")
+    # Load shows wherever Quit does, Save only where its guard says
+    mode = source[source.index("void __fastcall PauseModeHook("):]
+    assert "g_saveShown = field && !Withheld();" in mode
+    assert "const bool want = g_saveShown || (field && g_loadOn && g_loadStep == LoadStep::Off);" in mode
