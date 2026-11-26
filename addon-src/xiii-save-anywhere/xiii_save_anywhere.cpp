@@ -2187,6 +2187,15 @@ void HoldArrival(int state) {
     if (std::fabs(at - to) < 0.01f || to < 0.5f || to > 10.0f) return;
     Vec4 her{};
     if (!Position(PlayerHandle(), her) || StandIn(her)) return;
+    // the ease is caught on its first frame or two, so she's on the spot. Off
+    // it, she's walked away or this isn't our load's ease-in, and moving the
+    // anchor would pull her back to a spot she's left
+    const float off = std::hypot(her.v[0] - g_landTarget.v[0], her.v[2] - g_landTarget.v[2]);
+    if (off > 0.75f) {
+        g_holdArrivalUntil = 0;
+        Log("the ease-in started %.2f m off the spot, leaving it be", off);
+        return;
+    }
     float dx = her.v[0] - anchor[0], dz = her.v[2] - anchor[2];
     // the anchor's zero till the controller fills it, and one put back after
     // ours went in would undo it with the distance already eased: a jump
@@ -3083,7 +3092,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.29, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.30, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3129,7 +3138,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.29";
+    d.version = "0.25.30";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

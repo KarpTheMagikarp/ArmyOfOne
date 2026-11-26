@@ -982,6 +982,8 @@ def test_a_load_of_ours_holds_the_controllers_ease_in():
     hold = hold[:hold.index("\n}\n")]
     assert "if (std::fabs(at - to) < 0.01f || to < 0.5f || to > 10.0f) return;" in hold
     assert "if (len < 1.0f || len > 8.0f) return;" in hold
+    # and only while she's still on the spot, so it can't pull her back to it
+    assert hold.index("if (off > 0.75f) {") < hold.index("std::memcpy(ctrl + kArrivalAnchor")
     assert "g_landTarget.v[0] - to * dx" in hold and "g_landTarget.v[2] - to * dz" in hold
     assert hold.index("std::memcpy(ctrl + kArrivalAnchor") < hold.index("std::memcpy(ctrl + kArrivalAt")
     assert "if (g_holdArrivalUntil) HoldArrival(state);" in source
