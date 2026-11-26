@@ -296,8 +296,8 @@ def test_a_load_of_ours_lands_through_the_spawn_alone_and_still_checks_for_a_fal
     # the spawn lifts her 1.45 off the marker, so ours answers that much under
     # the floor she stood on, less 5 cm, the way a station's marker sits
     assert "constexpr float kSpawnRise = 1.40f;" in source
-    assert "out.m[13] = saved.m[13] - kSpawnRise;" in source
-    assert "g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0);" in source
+    assert "out.m[13] = y - kSpawnRise;" in source
+    assert "g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0, g_spawn.approach, g_spawn.from);" in source
     assert "SetPos" not in source and "0x2C3450" not in source
     body = source[source.index("void TickLoad(int state) {"):]
     body = body[:body.index("\n}\n")]
@@ -375,7 +375,7 @@ def test_a_station_is_what_makes_a_state_safe_to_save_in():
     assert 'Sanctify("a station")' in tick and "state == kStateFieldIdle" in tick
     assert 'Sanctify("the station this load started at")' in tick
     assert "if (format >= 4) g_sanction = kOurs;" in source
-    assert '"xiii-save-anywhere 6\\nhash' in source
+    assert '"xiii-save-anywhere 7\\nhash' in source
     assert "g_readBytes" not in source
     # any read wipes the old state until the new field's settled
     assert "g_sanctioned.story = -1;" in tick
@@ -457,7 +457,7 @@ def test_platforms_any_way_they_move_and_where_a_missing_floor_sends_you():
     assert "for (int i = 0; i < g_fallbackCount; ++i) {" in avoid and "return false;" in avoid
     arm = source[source.index("void TryArm(int marker) {"):]
     arm = arm[:arm.index("\n}\n")]
-    assert "} else if (!AvoidLostSpots(load.slot, saved)) {" in arm
+    assert "} else if (const Vec4 spot = Translation(saved.m); !AvoidLostSpots(load.slot, saved)) {" in arm
     assert 'fprintf(file, "\\ntrail %d", g_savedTrailCount);' in source
     # a station starts a fresh trail, and a new field throws the old one away
     assert "g_trailCount = 0;" in source[source.index("void Sanctify("):]
@@ -488,7 +488,7 @@ def test_save_waits_for_the_levels_own_floor():
            "                g_idleSolid = read && footing.solid;" in source
     assert "if (Steady(rise) && !carried && g_idleSolid && offRide) {" in source
     # a new field starts her off the floor until she's sampled standing on it
-    assert "g_trailCount = 0;\n        g_idleSolid = false;" in source
+    assert "g_trailCount = 0;\n        g_pathCount = 0;\n        g_idleSolid = false;" in source
 
 
 def test_spots_and_dumps_keep_to_their_own_folders():
@@ -965,27 +965,40 @@ def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     assert 'Log("  controller through the trace: %d of %u dwords changed"' in source
 
 
-def test_a_load_of_ours_holds_the_controllers_ease_in():
+def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on_the_spot():
     """
-    a load sets the leader 4.06 m off the start marker and the field
-    controller eases her in to 2.25 m, which is walking up to the terminal
-    on a station's load and a 1.75 m slide off the spot on ours. Ours moves
-    the anchor to 2.25 m off the spot on the same line and takes the
-    distance as eased, once the anchor's filled in, and only on its own loads
+    the field controller eases every load in from 4.0625 m off the marker to
+    2.25, which walked ours 1.75 m on along her heading. Poking its fields
+    didn't take (0.25.29 to 0.25.31: the anchor it read is a smoothing ring
+    the game refills every frame), so nothing touches the controller now.
+    Instead a save keeps a crumb 1.85 to 2.5 m back on a straight walk in,
+    and the marker goes 2.25 m ahead of the spot along that line: she starts
+    on ground she walked and the ease-in finishes on the spot
     """
     source = SOURCE.read_text(encoding="utf-8")
-    # the live anchor: +0x8C and +0xAC only get it copied in once the ease is over
-    assert "constexpr size_t kArrivalAnchor = 0x9C, kArrivalTo = 0x26C, kArrivalAt = 0x34C;" in source
-    assert "kArrivalAnchorToo" not in source
+    assert "HoldArrival" not in source and "kArrival" not in source
+    assert "constexpr float kEaseInTo = 2.25f, kEaseInFrom = 4.0625f;" in source
+    find = source[source.index("bool FindApproach(const Vec4& spot, Vec4& from) {"):]
+    find = find[:find.index("\n}\n")]
+    assert "if (flat(at(0), spot) > 0.5f) return false;" in find
+    assert "if (d > 2.5f || std::fabs(c.v[1] - spot.v[1]) > 0.6f || OnMovingPiece(c)) return false;" in find
+    assert "if (side > 0.4f || along < lastAlong - 0.1f) return false;" in find
+    # crumbs only on steady ground off any ride, and the path restarts with the trail
+    tick = source[source.index("void Tick() {"):]
+    assert "NotePath(next.pos);\n            } else {\n                g_pathCount = 0;" in tick
+    import re
+    resets = re.findall(r"\n( +)g_trailCount = 0;\n( +)(\w+)", source)
+    assert resets and all(a == b and name == "g_pathCount" for a, b, name in resets)
+    save = source[source.index("void StartSave() {"):]
+    assert "g_savedApproach = FindApproach(Translation(g_savedMatrix.m), g_savedFrom);" in save[:save.index("\n}\n")]
+    assert 'fprintf(file, "\\napproach %d %.6f %.6f %.6f\\n"' in source
+    assert "version >= 3 && version <= 7" in source
+    spawn = source[source.index("Matrix SpawnMatrix("):]
+    spawn = spawn[:spawn.index("\n}\n")]
+    assert "step = kEaseInTo;" in spawn and "y = std::max(y, from.v[1]);" in spawn
+    assert "out.m[13] = y - kSpawnRise;" in spawn
+    # a spot AvoidLostSpots moved isn't the one she walked in to
     arm = source[source.index("void TryArm(int marker) {"):]
     arm = arm[:arm.index("\n}\n")]
-    assert "g_holdArrivalUntil = GetTickCount64() + 45000;" in arm
-    hold = source[source.index("void HoldArrival(int state) {"):]
-    hold = hold[:hold.index("\n}\n")]
-    assert "if (std::fabs(at - to) < 0.01f || to < 0.5f || to > 10.0f) return;" in hold
-    assert "if (len < 1.0f || len > 8.0f) {" in hold
-    # and only while she's still on the spot, so it can't pull her back to it
-    assert hold.index("if (off > 0.75f) {") < hold.index("std::memcpy(ctrl + kArrivalAnchor")
-    assert "g_landTarget.v[0] - to * dx" in hold and "g_landTarget.v[2] - to * dz" in hold
-    assert hold.index("std::memcpy(ctrl + kArrivalAnchor") < hold.index("std::memcpy(ctrl + kArrivalAt")
-    assert "if (g_holdArrivalUntil) HoldArrival(state);" in source
+    assert "approach && same" in arm
+    assert "SpawnMatrix(g_spawn.matrix, out0, g_spawn.approach, g_spawn.from)" in source

@@ -137,14 +137,6 @@ constexpr DWORD kSetMatrixRva = 0x3C1970;
 // path that moves her with no stick, which is the one under suspicion
 constexpr DWORD kFieldPlayerRva = 0x23FF554;
 constexpr size_t kFieldPlayerFlags = 0x154, kFieldPlayerSpan = 0x600;
-// a load sets the leader down 4.06 m off the start marker and that
-// controller eases her in to 2.25 m: walking up to the terminal, on a
-// station's own load. She's held on the line out from its anchor at the
-// eased distance: the anchor's the answered marker at +0x9C, the distance
-// it's easing to is +0x26C and where it's got to +0x34C. +0x8C and +0xAC
-// read zero through the ease and only get the anchor copied in at its end,
-// which is why 0.25.29 never caught one (Ch 3, Nov 25)
-constexpr size_t kArrivalAnchor = 0x9C, kArrivalTo = 0x26C, kArrivalAt = 0x34C;
 constexpr unsigned char kSetMatrixHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x89, 0x4D, 0xB4};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
@@ -308,6 +300,13 @@ constexpr DWORD kZoneNumber = 0x1D68;
 // third row (measured the same in every zone tried), so ours answers that
 // much ahead of the spot and the leader lands on it
 constexpr float kSpawnStep = 4.0f;
+// then the field controller eases her in to this far off it, walking up to
+// the terminal on a station's own load. On ours that walked her 1.75 m on
+// along her heading (Ch 7 and Ch 3, Nov 23 and 25: 4.0625 to 2.25 off the
+// marker, station loads included). So where she came from is on file, and
+// the marker goes this far ahead of the spot along that line: she starts
+// 1.81 m back on ground she walked and the ease-in ends on the spot
+constexpr float kEaseInTo = 2.25f, kEaseInFrom = 4.0625f;
 // and this far above it: every load of ours came up exactly 1.45 over the
 // spot, and a station's own marker sits that far under the floor it spawns
 // you on (Ch 9's at 72.67, the deck at 74.12). Answering with the floor
@@ -417,6 +416,9 @@ ULONGLONG g_phaseStart = 0;
 Matrix g_savedMatrix{};
 Vec4 g_savedTrail[6]{};
 int g_savedTrailCount = 0;
+// where she came from on the way to the spot, if it's a straight walk in
+bool g_savedApproach = false;
+Vec4 g_savedFrom{};
 SavePoint g_savedPoint{};
 int g_lastState = -1;
 void* g_leadPad = nullptr;
@@ -459,6 +461,8 @@ struct Spawn {
     Matrix matrix{};
     int slot = -1;
     int answered = 0;
+    bool approach = false;
+    Vec4 from{};
 };
 Spawn g_spawn;
 ULONGLONG g_landCheckAt = 0, g_landGiveUp = 0, g_landSeenAt = 0;
@@ -765,8 +769,6 @@ std::atomic<bool> g_fieldAnimates{false};
 std::atomic<void*> g_watchActor{nullptr};
 std::atomic<ULONGLONG> g_watchUntil{0};
 std::atomic<int> g_watchLines{0};
-// a load of ours is up and the controller's ease-in hasn't been dealt with
-ULONGLONG g_holdArrivalUntil = 0;
 // the controller as it was when the trace started, to diff at its end
 unsigned char g_ctrlStart[kFieldPlayerSpan];
 size_t g_ctrlGot = 0;
@@ -1371,6 +1373,55 @@ void Remember(const Vec4& at) {
     g_trailCount = std::min(g_trailCount + 1, kTrailLength);
 }
 
+// the last few metres she walked, a breadcrumb every 25 cm, newest last.
+// Only steady ground off any ride: a jump, a lift or a teleport starts it
+// again, so a line between two crumbs never crosses something she didn't walk
+constexpr int kPathLength = 32;
+Vec4 g_path[kPathLength]{};
+int g_pathCount = 0, g_pathNext = 0;
+
+void NotePath(const Vec4& at) {
+    if (g_pathCount) {
+        const Vec4& last = g_path[(g_pathNext + kPathLength - 1) % kPathLength];
+        const float d = std::hypot(at.v[0] - last.v[0], at.v[2] - last.v[2]);
+        if (d > 3.0f || std::fabs(at.v[1] - last.v[1]) > 1.0f) g_pathCount = 0;
+        else if (d < 0.25f) return;
+    }
+    g_path[g_pathNext++ % kPathLength] = at;
+    g_pathCount = std::min(g_pathCount + 1, kPathLength);
+}
+
+bool OnMovingPiece(const Vec4& at);
+
+// a crumb 1.85 to 2.5 m back from the spot that she walked in from in a
+// straight line: every crumb after it closer to the spot and within 40 cm of
+// the line, and the newest one on the spot. That's where a load can start her
+// for the ease-in to carry her onto it
+bool FindApproach(const Vec4& spot, Vec4& from) {
+    if (g_pathCount < 2) return false;
+    const auto at = [](int back) -> const Vec4& { return g_path[(g_pathNext - 1 - back + 2 * kPathLength) % kPathLength]; };
+    const auto flat = [](const Vec4& a, const Vec4& b) { return std::hypot(a.v[0] - b.v[0], a.v[2] - b.v[2]); };
+    if (flat(at(0), spot) > 0.5f) return false;
+    for (int back = 1; back < g_pathCount; ++back) {
+        const Vec4& c = at(back);
+        const float d = flat(c, spot);
+        if (d < 1.85f) continue;
+        if (d > 2.5f || std::fabs(c.v[1] - spot.v[1]) > 0.6f || OnMovingPiece(c)) return false;
+        const float ux = (spot.v[0] - c.v[0]) / d, uz = (spot.v[2] - c.v[2]) / d;
+        float lastAlong = 0;
+        for (int k = back - 1; k >= 0; --k) {
+            const Vec4& q = at(k);
+            const float along = (q.v[0] - c.v[0]) * ux + (q.v[2] - c.v[2]) * uz;
+            const float side = std::fabs((q.v[0] - c.v[0]) * uz - (q.v[2] - c.v[2]) * ux);
+            if (side > 0.4f || along < lastAlong - 0.1f) return false;
+            lastAlong = along;
+        }
+        from = c;
+        return true;
+    }
+    return false;
+}
+
 // Debug only: the leader's actor, raw, once per pause, to find what she's
 // standing on by comparing a pause on plain floor with one on a platform.
 // Plus what it points at, one hop out, since the ground she's on more likely
@@ -1455,10 +1506,19 @@ void DumpActor() {
 // the spot as the spawn should get it: upright, since the live matrix leans
 // on slopes and lifts and a leaned start marker leaves the leader standing
 // at that angle, and a step ahead of the spot so the spawn's own step back
-// lands on it. A matrix with no heading left in it keeps the station's
-Matrix SpawnMatrix(const Matrix& saved, const float* station) {
+// lands on it. A matrix with no heading left in it keeps the station's. With
+// a walk in on file she faces along it and the marker goes kEaseInTo ahead,
+// at the higher of the two heights so the start's never inside the ground
+Matrix SpawnMatrix(const Matrix& saved, const float* station, bool approach = false, const Vec4& from = {}) {
     Matrix out = saved;
     float fx = saved.m[8], fz = saved.m[10];
+    float step = kSpawnStep, y = saved.m[13];
+    if (approach) {
+        fx = saved.m[12] - from.v[0];
+        fz = saved.m[14] - from.v[2];
+        step = kEaseInTo;
+        y = std::max(y, from.v[1]);
+    }
     float len = std::hypot(fx, fz);
     if (len < 0.2f) {
         fx = station[8];
@@ -1469,9 +1529,9 @@ Matrix SpawnMatrix(const Matrix& saved, const float* station) {
     fz /= len;
     const float rows[12] = {fz, 0, -fx, 0, 0, 1, 0, 0, fx, 0, fz, 0};
     std::memcpy(out.m, rows, sizeof rows);
-    out.m[12] = saved.m[12] + kSpawnStep * fx;
-    out.m[13] = saved.m[13] - kSpawnRise;
-    out.m[14] = saved.m[14] + kSpawnStep * fz;
+    out.m[12] = saved.m[12] + step * fx;
+    out.m[13] = y - kSpawnRise;
+    out.m[14] = saved.m[14] + step * fz;
     return out;
 }
 
@@ -1600,18 +1660,20 @@ void WriteWhere(const SlotHash& save) {
         return;
     }
     const float* m = g_savedMatrix.m;
-    // 4: made with the full state guard, 6 adds the world journal. A 3 is from
-    // before the guard, and loading one never counts as a state a station
-    // could save. A 5's journal kept the engine's own area streaming too, and
-    // replaying that hid things, so a 5 loads with its spot and nothing put back
-    fprintf(file, "xiii-save-anywhere 6\nhash %016llx\npoint ", save.hash);
+    // 4: made with the full state guard, 6 adds the world journal, 7 where she
+    // walked in from. A 3 is from before the guard, and loading one never
+    // counts as a state a station could save. A 5's journal kept the engine's
+    // own area streaming too, and replaying that hid things, so a 5 loads with
+    // its spot and nothing put back
+    fprintf(file, "xiii-save-anywhere 7\nhash %016llx\npoint ", save.hash);
     for (unsigned char b : g_savedPoint.bytes) fprintf(file, "%02x", b);
     fprintf(file, "\npos %.6f %.6f %.6f\nmatrix", m[12], m[13], m[14]);
     for (float f : g_savedMatrix.m) fprintf(file, " %.9g", f);
     fprintf(file, "\ntrail %d", g_savedTrailCount);
     for (int i = 0; i < g_savedTrailCount; ++i)
         fprintf(file, " %.6f %.6f %.6f", g_savedTrail[i].v[0], g_savedTrail[i].v[1], g_savedTrail[i].v[2]);
-    fprintf(file, "\n");
+    fprintf(file, "\napproach %d %.6f %.6f %.6f\n", g_savedApproach ? 1 : 0, g_savedFrom.v[0], g_savedFrom.v[1],
+            g_savedFrom.v[2]);
     WriteWorld(file, g_savedWorld, g_savedZone, g_savedMapSet);
     fclose(file);
     Moment("saved with save anywhere");
@@ -1623,7 +1685,8 @@ void WriteWhere(const SlotHash& save) {
 }
 
 bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& matrix, int* format = nullptr,
-               Vec4* trail = nullptr, int* trailCount = nullptr, std::vector<Entry>* world = nullptr) {
+               Vec4* trail = nullptr, int* trailCount = nullptr, std::vector<Entry>* world = nullptr,
+               bool* approach = nullptr, Vec4* from = nullptr) {
     FILE* file = nullptr;
     if (fopen_s(&file, WherePath(slot).c_str(), "r") != 0 || !file) return false;
     char hex[40]{};
@@ -1631,7 +1694,7 @@ bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& mat
     float pos[3]{};
     bool ok = fscanf_s(file, "xiii-save-anywhere %d hash %llx point %32s pos %f %f %f matrix", &version, &hash, hex,
                        static_cast<unsigned>(sizeof hex), &pos[0], &pos[1], &pos[2]) == 6 &&
-              version >= 3 && version <= 6 && std::strlen(hex) == 32;
+              version >= 3 && version <= 7 && std::strlen(hex) == 32;
     if (format) *format = version;
     for (int i = 0; ok && i < 16; ++i) ok = fscanf_s(file, "%f", &matrix.m[i]) == 1 && std::isfinite(matrix.m[i]);
     // older files have no trail, which only means the station's the fallback
@@ -1650,6 +1713,14 @@ bool ReadWhere(int slot, unsigned long long& hash, SavePoint& point, Matrix& mat
         std::copy(steps, steps + read, trail);
         *trailCount = read;
     }
+    int walkedIn = 0;
+    Vec4 walkedFrom{};
+    if (ok && read == count && version >= 7 &&
+        (fscanf_s(file, " approach %d %f %f %f", &walkedIn, &walkedFrom.v[0], &walkedFrom.v[1], &walkedFrom.v[2]) != 4 ||
+         !std::isfinite(walkedFrom.v[0]) || !std::isfinite(walkedFrom.v[1]) || !std::isfinite(walkedFrom.v[2])))
+        walkedIn = 0;
+    if (approach) *approach = walkedIn == 1;
+    if (from) *from = walkedFrom;
     // and older ones no journal: the spot still works, there's just nothing to put back
     if (world) {
         world->clear();
@@ -1895,6 +1966,7 @@ void StartSave() {
     g_savedMapSet = MapSetName();
     std::copy(g_trail, g_trail + g_trailCount, g_savedTrail);
     g_savedTrailCount = g_trailCount;
+    g_savedApproach = FindApproach(Translation(g_savedMatrix.m), g_savedFrom);
     // the pause screen only closes through its own Resume, so it gets one:
     // a frame of Start, the button that resumes. Firing the zone's PAUSE_REQ
     // instead moved the state machine on but left the screen up
@@ -2046,7 +2118,10 @@ void TryArm(int marker) {
     Matrix saved{};
     int format = 0;
     std::vector<Entry> world;
-    const bool ours = ReadWhere(load.slot, stored, point, saved, &format, g_fallback, &g_fallbackCount, &world);
+    bool approach = false;
+    Vec4 from{};
+    const bool ours =
+        ReadWhere(load.slot, stored, point, saved, &format, g_fallback, &g_fallbackCount, &world, &approach, &from);
     // the field's put back whenever the save is ours, whether or not the spot
     // can be used: a save made after a story beat needs its field back even
     // if it ends up starting at the station
@@ -2062,19 +2137,27 @@ void TryArm(int marker) {
         Log("slot %d spawns at a different save point than it was saved at, starting at the station", load.slot);
     } else if (saved.m[12] == 0.0f && saved.m[13] == 0.0f && saved.m[14] == 0.0f) {
         Log("slot %d's spot reads as the origin, starting at the station", load.slot);
-    } else if (!AvoidLostSpots(load.slot, saved)) {
+    } else if (const Vec4 spot = Translation(saved.m); !AvoidLostSpots(load.slot, saved)) {
         Log("slot %d's spot dropped her before and nothing she walked is off that stretch, starting at the station",
             load.slot);
     } else {
         // turned into the spawn's matrix on the first answer, against the station's
-        g_spawn = {true, marker, GetTickCount64() + 20000, saved, load.slot, 0};
+        // a spot moved off by AvoidLostSpots isn't the one she walked in to
+        const Vec4 now = Translation(saved.m);
+        const bool same = std::hypot(now.v[0] - spot.v[0], now.v[2] - spot.v[2]) < 0.01f;
+        g_spawn = {true, marker, GetTickCount64() + 20000, saved, load.slot, 0, approach && same, from};
+        if (g_spawn.approach)
+            Log("  walked in from %.2f %.2f %.2f: starting her %.2f m back along it for the ease-in to finish on the spot",
+                from.v[0], from.v[1], from.v[2], kEaseInFrom - kEaseInTo);
+        else
+            Log("  no straight walk in on file: the ease-in carries her %.2f m on along her heading",
+                kSpawnStep - kEaseInTo);
         g_landTarget = Translation(saved.m);
         g_savedSpot = g_landTarget;
         g_spotUsed = true;
         g_landCheckAt = GetTickCount64() + 2500;
         g_landGiveUp = GetTickCount64() + 15000;
         g_landSeenAt = 0;
-        g_holdArrivalUntil = GetTickCount64() + 45000;
         // made under the full guard, so it's a state a station could save
         if (format >= 4) g_sanction = kOurs;
         Log("slot %d: start marker %d answers with %.2f %.2f %.2f, %u things to check the field for once it's up",
@@ -2102,7 +2185,7 @@ int __fastcall MarkerLookupHook(void* manager, void* edx, int marker, float* out
     const Vec4 station = Translation(out0);
     if (g_spawn.answered == 0) {
         g_stationPos = station;
-        g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0);
+        g_spawn.matrix = SpawnMatrix(g_spawn.matrix, out0, g_spawn.approach, g_spawn.from);
     }
     float delta[3];
     for (int i = 0; i < 3; ++i) delta[i] = g_spawn.matrix.m[12 + i] - station.v[i];
@@ -2152,6 +2235,7 @@ void Sanctify(const char* where, bool baseline = true) {
         LeaveCriticalSection(&g_worldLock);
     }
     g_trailCount = 0;
+    g_pathCount = 0;
     g_rode = false;
     g_lostLanding = false;
     if (news) Log("story %d at %s", now.story, where);
@@ -2164,62 +2248,6 @@ void Sanctify(const char* where, bool baseline = true) {
 // marked so the next load starts somewhere she walked, and Save stays off.
 // Right after a load the handle points at a stand-in for a few seconds, so
 // only reads by the target count
-// ours has no terminal to walk up to, so the ease-in carried her 1.75 m on
-// along her heading every load. The anchor goes to 2.25 m off the spot on
-// the same line and the distance is taken as already eased: the end state a
-// station load gets to, without her sliding there
-void HoldArrival(int state) {
-    const ULONGLONG now = GetTickCount64();
-    if (now > g_holdArrivalUntil) {
-        g_holdArrivalUntil = 0;
-        Log("no ease-in after the load, nothing to hold");
-        return;
-    }
-    if (state != kStateFieldIdle) return;
-    auto* ctrl = *reinterpret_cast<unsigned char**>(g_base + kFieldPlayerRva);
-    if (!ctrl) return;
-    float anchor[3], to = 0, at = 0;
-    if (Readable(ctrl + kArrivalAnchor, reinterpret_cast<unsigned char*>(anchor), sizeof anchor) != sizeof anchor ||
-        Readable(ctrl + kArrivalTo, reinterpret_cast<unsigned char*>(&to), sizeof to) != sizeof to ||
-        Readable(ctrl + kArrivalAt, reinterpret_cast<unsigned char*>(&at), sizeof at) != sizeof at)
-        return;
-    if (!std::isfinite(to) || !std::isfinite(at) || !std::isfinite(anchor[0]) || !std::isfinite(anchor[2])) return;
-    // not easing yet
-    if (std::fabs(at - to) < 0.01f || to < 0.5f || to > 10.0f) return;
-    Vec4 her{};
-    if (!Position(PlayerHandle(), her) || StandIn(her)) return;
-    // the ease is caught on its first frame or two, so she's on the spot. Off
-    // it, she's walked away or this isn't our load's ease-in, and moving the
-    // anchor would pull her back to a spot she's left
-    const float off = std::hypot(her.v[0] - g_landTarget.v[0], her.v[2] - g_landTarget.v[2]);
-    if (off > 0.75f) {
-        g_holdArrivalUntil = 0;
-        Log("the ease-in started %.2f m off the spot, leaving it be", off);
-        return;
-    }
-    float dx = her.v[0] - anchor[0], dz = her.v[2] - anchor[2];
-    // the anchor's zero till the controller fills it, and one put back after
-    // ours went in would undo it with the distance already eased: a jump
-    const float len = std::hypot(dx, dz);
-    if (len < 1.0f || len > 8.0f) {
-        static ULONGLONG said = 0;
-        if (g_holdArrivalUntil != said) {
-            said = g_holdArrivalUntil;
-            Trace("  ease-in under way but its anchor reads %.2f %.2f, %.2f m off her", anchor[0], anchor[2], len);
-        }
-        return;
-    }
-    dx /= len;
-    dz /= len;
-    // through the spot, not where she is: she can be a frame or two into it
-    const float moved[3] = {g_landTarget.v[0] - to * dx, anchor[1], g_landTarget.v[2] - to * dz};
-    std::memcpy(ctrl + kArrivalAnchor, moved, sizeof moved);
-    std::memcpy(ctrl + kArrivalAt, &to, sizeof to);
-    g_holdArrivalUntil = 0;
-    Log("held the ease-in: anchor %.2f %.2f moved to %.2f %.2f, %.2f m she'd have slid", anchor[0], anchor[2],
-        moved[0], moved[2], at - to);
-}
-
 void TickLoad(int state) {
     if (!g_landCheckAt || state != kStateFieldIdle || GetTickCount64() < g_landCheckAt) return;
     const ULONGLONG now = GetTickCount64();
@@ -2455,6 +2483,7 @@ void Tick() {
     // a new field's coordinates aren't the old one's
     if (state == 1 || state == 2) {
         g_trailCount = 0;
+        g_pathCount = 0;
         g_idleSolid = false;
         g_nearFloor = false;
         g_rode = false;
@@ -2532,6 +2561,9 @@ void Tick() {
                         next.pos.v[1], next.pos.v[2]);
                 g_rode = false;
                 if (g_sanctioned.story >= 0) Remember(next.pos);
+                NotePath(next.pos);
+            } else {
+                g_pathCount = 0;
             }
         }
     }
@@ -2541,6 +2573,7 @@ void Tick() {
         // ground walked before a scene may be the wrong side of whatever it
         // changed, so the trail starts again after it
         g_trailCount = 0;
+        g_pathCount = 0;
         // against where it started, not the last station: a chest or a ledge
         // jump on the way flips flags, and those were fine before the scene
         ReadProgress(g_sceneStart);
@@ -2751,7 +2784,6 @@ void Tick() {
         }
     }
     TickSave(state);
-    if (g_holdArrivalUntil) HoldArrival(state);
     if (g_phase == Phase::Idle && g_enabled) TickLoad(state);
     g_lastState = state;
 }
@@ -3099,7 +3131,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.31, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.32, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3145,7 +3177,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.31";
+    d.version = "0.25.32";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
