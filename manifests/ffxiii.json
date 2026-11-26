@@ -192,13 +192,13 @@
         {
           "source": "assets/mods/xiii-save-anywhere/xiii_save_anywhere.asi",
           "target": "xiii_save_anywhere.asi",
-          "sha256": "b8c69300bee5f8545391826b9af196a400783b5de8f18a085f1dc7eb530c9b20"
+          "sha256": "2a24248f035456b8a04c271b42941d4a7fcdc4f5d1b1115c90afcd0a160e7f6b"
         },
         {
           "source": "assets/mods/xiii-save-anywhere/xiii-save-anywhere.ini",
           "target": "xiii-save-anywhere.ini",
           "config": true,
-          "sha256": "7cad6c41cbf2364fb699979954761451934faf2d983f30a16ce00354cfc870d8"
+          "sha256": "0f66b70bf5d62ddde3642e6f5a6f204084ffeb82c389863bc250248b5fb62bb0"
         },
         {
           "source": "assets/mods/xiii-save-anywhere/LICENSE-MinHook.txt",
