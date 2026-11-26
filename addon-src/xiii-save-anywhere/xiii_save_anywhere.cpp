@@ -140,10 +140,11 @@ constexpr size_t kFieldPlayerFlags = 0x154, kFieldPlayerSpan = 0x600;
 // a load sets the leader down 4.06 m off the start marker and that
 // controller eases her in to 2.25 m: walking up to the terminal, on a
 // station's own load. She's held on the line out from its anchor at the
-// eased distance, which is the anchor at +0x8C (and again at +0xAC), the
-// distance it's easing to at +0x26C and where it's got to at +0x34C. Read
-// off a station load and one of ours, Ch 7, Nov 23
-constexpr size_t kArrivalAnchor = 0x8C, kArrivalAnchorToo = 0xAC, kArrivalTo = 0x26C, kArrivalAt = 0x34C;
+// eased distance: the anchor's the answered marker at +0x9C, the distance
+// it's easing to is +0x26C and where it's got to +0x34C. +0x8C and +0xAC
+// read zero through the ease and only get the anchor copied in at its end,
+// which is why 0.25.29 never caught one (Ch 3, Nov 25)
+constexpr size_t kArrivalAnchor = 0x9C, kArrivalTo = 0x26C, kArrivalAt = 0x34C;
 constexpr unsigned char kSetMatrixHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x89, 0x4D, 0xB4};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
@@ -2200,13 +2201,19 @@ void HoldArrival(int state) {
     // the anchor's zero till the controller fills it, and one put back after
     // ours went in would undo it with the distance already eased: a jump
     const float len = std::hypot(dx, dz);
-    if (len < 1.0f || len > 8.0f) return;
+    if (len < 1.0f || len > 8.0f) {
+        static ULONGLONG said = 0;
+        if (g_holdArrivalUntil != said) {
+            said = g_holdArrivalUntil;
+            Trace("  ease-in under way but its anchor reads %.2f %.2f, %.2f m off her", anchor[0], anchor[2], len);
+        }
+        return;
+    }
     dx /= len;
     dz /= len;
     // through the spot, not where she is: she can be a frame or two into it
     const float moved[3] = {g_landTarget.v[0] - to * dx, anchor[1], g_landTarget.v[2] - to * dz};
     std::memcpy(ctrl + kArrivalAnchor, moved, sizeof moved);
-    std::memcpy(ctrl + kArrivalAnchorToo, moved, sizeof moved);
     std::memcpy(ctrl + kArrivalAt, &to, sizeof to);
     g_holdArrivalUntil = 0;
     Log("held the ease-in: anchor %.2f %.2f moved to %.2f %.2f, %.2f m she'd have slid", anchor[0], anchor[2],
@@ -3092,7 +3099,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.30, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.31, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3138,7 +3145,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.30";
+    d.version = "0.25.31";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
