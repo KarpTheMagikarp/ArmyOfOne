@@ -755,6 +755,13 @@ body.busy #workDisc2{opacity:.95;animation:spin 1.15s linear infinite}
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color var(--look-fade) ease}
 /* not shaped like a patch row on purpose, it is the one thing you press */
 #ver{margin-left:18px;opacity:.75;--gh:8px}
+/* the title screen's credit, across from the version like the game's own. Out
+   of the flow so it never nudges the bar, and it hands the slot to the install
+   path once a game's open */
+#foot > #maker{position:absolute;left:var(--indent);top:50%;margin-top:calc(var(--gh) / -2);
+  opacity:.75;--gh:8px;pointer-events:none;
+  transition:opacity calc(.2s * var(--pace)) ease, transform calc(.26s * var(--pace)) cubic-bezier(.15,.95,.25,1)}
+body.m2 #maker{opacity:0;transform:translateX(-26px)}
 
 /* Mouse users get the neutral glove, always, tracking exactly. No snapping and
    no sprite swapping, because swapping mid-move was the distracting part.
@@ -1637,6 +1644,10 @@ body.m1 #toolBar{opacity:0;visibility:hidden;pointer-events:none;
         <img src="../assets/key_E.png" alt="E">
         <span class="now" id="swNow"></span>
       </div>
+      <span id="maker" class="stat" aria-label="by KarpTheMagikarp">
+        <span class="gl dim" data-ff13="BY" style="--gh:7px"></span>
+        <span class="gl" data-ff13="KARPTHEMAGIKARP"></span>
+      </span>
       <span id="ver" class="stat">
         <span class="gl dim" data-ff13="VER" style="--gh:7px"></span>
         <span class="gl" id="verNum"></span>
