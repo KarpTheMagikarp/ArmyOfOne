@@ -812,6 +812,10 @@ def test_a_cutscene_a_callback_loaded_for_later_comes_back_with_the_save():
     missing = source[source.index("std::vector<Entry> Missing("):]
     missing = missing[:missing.index("\n}\n")]
     assert "if (w.op == Op::Cutscene && !w.i) continue;" in missing
+    # one the rebuild already loaded never goes in again, whatever arg it took:
+    # a load over itself was a pure virtual call in Nautilus (Nov 27)
+    assert "if (w.op == Op::Cutscene && it != have.end() && it->i) continue;" in missing
+    assert missing.index("auto it = std::find_if") < missing.index("it != have.end() && it->i) continue;")
     replay = source[source.index("bool Replay(const Entry& e) {"):]
     replay = replay[:replay.index("\n}\n")]
     assert "case Op::Cutscene: {" in replay and "g_base + kCutsceneRva" in replay
