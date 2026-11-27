@@ -2433,6 +2433,17 @@ void TickLoad(int state) {
     const float flat = read && !standIn ? std::hypot(at.v[0] - g_landTarget.v[0], at.v[2] - g_landTarget.v[2]) : 1e9f;
     const float drop = g_landTarget.v[1] - at.v[1];
     if (g_worldCheckWanted) return;
+    // seen at the spot, then walked a few metres off it on the level: the
+    // floor held her. A fall through it happens before she can get anywhere,
+    // and hopping off a ledge next to the spot later is just a hop (Gran
+    // Pulse, Nov 27: walked off, came back, jumped down, and Save went off
+    // till a station)
+    if (g_landSeenAt && flat >= 3.0f && flat < 1e8f && std::fabs(drop) < 1.0f) {
+        Log("landed at the spot, she walked off it to %.2f %.2f %.2f", at.v[0], at.v[1], at.v[2]);
+        g_landCheckAt = 0;
+        g_spawn.armed = false;
+        return;
+    }
     // straight down: a walk or a hop off a step covers more ground than
     // height, and 0.25.13 read a jump next to the spot as a fall (Nov 23)
     if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {
@@ -3419,7 +3430,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.45, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.46, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3465,7 +3476,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.45";
+    d.version = "0.25.46";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

@@ -1016,6 +1016,20 @@ def test_the_party_stepping_off_for_a_chocobo_isnt_a_chara_a_load_misses():
     # a station or a new field forgets the riders with everything else
     assert source.count("g_rideParty.clear();") == 2
 
+def test_walking_off_the_spot_settles_the_landing_so_a_later_hop_isnt_a_fall():
+    """
+    Gran Pulse, Nov 27: loaded on a ridge, walked a few metres off, came back
+    and hopped down the ledge beside the spot inside the land check's window.
+    That read as falling through the spot's floor, so Save went off till a
+    station. A fall through happens before she can walk anywhere, so seen at
+    the spot and then 3 m off it on the level settles it
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void TickLoad(int state) {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "if (g_landSeenAt && flat >= 3.0f && flat < 1e8f && std::fabs(drop) < 1.0f) {" in tick
+    assert tick.index("if (g_landSeenAt && flat >= 3.0f") < tick.index("if (flat < 3.0f && drop > 1.5f")
+
 def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     """
     every load ends 1.6 to 1.8 m forward of where it set her down, a station's
