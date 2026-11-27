@@ -1,7 +1,7 @@
 {
   "game_id": "ffxiii2",
   "display_name": "Final Fantasy XIII-2",
-  "manifest_version": "v1.0.1",
+  "manifest_version": "v1.0.0",
   "steam_app_id": "292140",
   "ui_id": "ff13-2",
   "executable_relative_path": "alba_data/prog/win/bin/ffxiii2img.exe",

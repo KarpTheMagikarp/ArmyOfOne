@@ -1,7 +1,7 @@
 {
   "game_id": "ffxiii",
   "display_name": "Final Fantasy XIII",
-  "manifest_version": "v1.0.1",
+  "manifest_version": "v1.0.0",
   "steam_app_id": "292120",
   "ui_id": "ff13",
   "executable_relative_path": "white_data/prog/win/bin/ffxiiiimg.exe",
