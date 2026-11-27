@@ -138,6 +138,11 @@ constexpr DWORD kSetMatrixRva = 0x3C1970, kControllerWriteRva = 0x227683;
 constexpr DWORD kFieldPlayerRva = 0x23FF554;
 constexpr size_t kFieldPlayerFlags = 0x154, kFieldPlayerSpan = 0x600;
 constexpr size_t kControllerAt = 0x1A8, kControllerAimY = 0x1BC;
+// what the ground under her moved this frame: exactly nought on the level's own
+// floor, 1e-6 noise on a parked platform, and on a moving one its step, which
+// matched the Ch 7 shaft platform's climb in direction and speed (Nov 27)
+constexpr size_t kControllerCarry = 0x7C;
+constexpr float kCarryMoving = 0.002f;
 constexpr unsigned char kSetMatrixHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x89, 0x4D, 0xB4};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
@@ -1470,10 +1475,60 @@ float WalkHeight(const Walk& walk, float x, float z, float* side = nullptr, floa
     return b.v[1];
 }
 
+// a block and what it points at, one hop out, for the dumps below
+struct Hops {
+    int count = 0;
+    DWORD from[64]{}, to[64]{}, size[64]{};
+    unsigned char bytes[64][0x400]{};
+};
+
+void Hop(const unsigned char* copy, size_t got, Hops& out) {
+    out.count = 0;
+    // heap pointers only: the exe's own tables are the same for everyone
+    const auto image = g_base;
+    for (size_t off = 0; off + 4 <= got && out.count < 64; off += 4) {
+        const DWORD to = *reinterpret_cast<const DWORD*>(copy + off);
+        if (to < 0x10000 || (to >= image && to < image + 0x2A00000) || to >= 0x7FFF0000 || (to & 3)) continue;
+        bool seen = false;
+        for (int i = 0; i < out.count && !seen; ++i) seen = out.to[i] == to;
+        if (seen) continue;
+        const size_t n = Readable(reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(to)),
+                                  out.bytes[out.count], sizeof out.bytes[0]);
+        if (!n) continue;
+        out.from[out.count] = static_cast<DWORD>(off);
+        out.to[out.count] = to;
+        out.size[out.count] = static_cast<DWORD>(n);
+        ++out.count;
+    }
+}
+
+void WriteDump(int dump, const char* what, const unsigned char* copy, size_t got, const Hops& hops) {
+    const std::string dir = Folder("debug");
+    char name[48];
+    std::snprintf(name, sizeof name, "\\pause-%02d%s.bin", dump, what);
+    FILE* file = nullptr;
+    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
+        fwrite(copy, 1, got, file);
+        fclose(file);
+    }
+    // each hop: where in the block it was found, where it points, how much, the bytes
+    std::snprintf(name, sizeof name, "\\pause-%02d%s-hops.bin", dump, what);
+    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
+        for (int i = 0; i < hops.count; ++i) {
+            fwrite(&hops.from[i], 4, 1, file);
+            fwrite(&hops.to[i], 4, 1, file);
+            fwrite(&hops.size[i], 4, 1, file);
+            fwrite(hops.bytes[i], 1, hops.size[i], file);
+        }
+        fclose(file);
+    }
+}
+
 // Debug only: the leader's actor, raw, once per pause, to find what she's
 // standing on by comparing a pause on plain floor with one on a platform.
-// Plus what it points at, one hop out, since the ground she's on more likely
-// sits in her controller than in the actor itself. Only pages VirtualQuery
+// The actor and one hop out had nothing that tells a ride from floor
+// (Palumpolum, Nov 26), so her controller goes too, the thing that walks her
+// and so the likeliest to know what's carrying her. Only pages VirtualQuery
 // says are committed and readable get copied
 void DumpActor() {
     static int dumps = 0;
@@ -1481,52 +1536,25 @@ void DumpActor() {
     unsigned char* registry = *g_actorRegistry;
     if (!registry) return;
     static unsigned char copy[0x1000];
-    static unsigned char hops[64][0x400];
-    static DWORD hopFrom[64], hopTo[64], hopSize[64];
-    int hopCount = 0;
+    static Hops hops;
     std::memset(copy, 0, sizeof copy);
     Vec4 at{};
     g_lock(registry + 0x6C0, nullptr, nullptr);
     unsigned char* actor = g_resolveActor(registry, nullptr, static_cast<int>(PlayerHandle()));
     const size_t got = actor ? Readable(actor, copy, sizeof copy) : 0;
-    // heap pointers only: the exe's own tables are the same for everyone
-    const auto image = g_base;
-    for (size_t off = 0; off + 4 <= got && hopCount < 64; off += 4) {
-        const DWORD to = *reinterpret_cast<DWORD*>(copy + off);
-        if (to < 0x10000 || (to >= image && to < image + 0x2A00000) || to >= 0x7FFF0000 || (to & 3)) continue;
-        bool seen = false;
-        for (int i = 0; i < hopCount && !seen; ++i) seen = hopTo[i] == to;
-        if (seen) continue;
-        const size_t n = Readable(reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(to)), hops[hopCount],
-                                  sizeof hops[0]);
-        if (!n) continue;
-        hopFrom[hopCount] = static_cast<DWORD>(off);
-        hopTo[hopCount] = to;
-        hopSize[hopCount] = static_cast<DWORD>(n);
-        ++hopCount;
-    }
+    Hop(copy, got, hops);
+    const int hopCount = hops.count;
     if (actor) std::memcpy(at.v, actor + kActorTranslation, sizeof at.v);
     g_unlock(registry + 0x6C0, nullptr);
     if (!actor || !got) return;
-    const std::string dir = Folder("debug");
-    char name[40];
     ++dumps;
-    std::snprintf(name, sizeof name, "\\pause-%02d.bin", dumps);
-    FILE* file = nullptr;
-    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
-        fwrite(copy, 1, got, file);
-        fclose(file);
-    }
-    // each hop: where in the actor it was found, where it points, how much, the bytes
-    std::snprintf(name, sizeof name, "\\pause-%02d-hops.bin", dumps);
-    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
-        for (int i = 0; i < hopCount; ++i) {
-            fwrite(&hopFrom[i], 4, 1, file);
-            fwrite(&hopTo[i], 4, 1, file);
-            fwrite(&hopSize[i], 4, 1, file);
-            fwrite(hops[i], 1, hopSize[i], file);
-        }
-        fclose(file);
+    WriteDump(dumps, "", copy, got, hops);
+    static unsigned char ctrlCopy[kFieldPlayerSpan];
+    static Hops ctrlHops;
+    if (auto* ctrl = *reinterpret_cast<unsigned char**>(g_base + kFieldPlayerRva)) {
+        const size_t ctrlGot = Readable(ctrl, ctrlCopy, sizeof ctrlCopy);
+        Hop(ctrlCopy, ctrlGot, ctrlHops);
+        if (ctrlGot) WriteDump(dumps, "-ctrl", ctrlCopy, ctrlGot, ctrlHops);
     }
     // how she was moving just before, so each dump says what it was
     float rise = 0;
@@ -2015,7 +2043,7 @@ const char* Withheld() {
     }
     if (g_rode)
         return g_rodeByScene ? "a scene moved her and she hasn't walked off where it left her yet"
-                             : "she rode a lift and hasn't walked off it yet";
+                             : "she rode a lift or a platform and hasn't walked off it yet";
     // near the floor only counts with ground walked since the last scene or
     // station behind it: if the spot's floor is gone on load, that's where she
     // lands instead of a station that may sit on the far side of the scene
@@ -2633,6 +2661,22 @@ void Tick() {
                 g_runMs = 0;
             }
             const bool carried = Carried();
+            // a platform the ray lost mid-leg still moves her through her own
+            // controller (Palumpolum Ch 7, Nov 26: a save on one floated her on
+            // load). Every carried step moves the latch along, so 6 m off is
+            // measured from where the ride ended, whatever it was
+            if (auto* ctrl = *reinterpret_cast<const unsigned char**>(g_base + kFieldPlayerRva)) {
+                const auto* step = reinterpret_cast<const float*>(ctrl + kControllerCarry);
+                if (std::fabs(step[0]) + std::fabs(step[1]) + std::fabs(step[2]) > kCarryMoving) {
+                    if (!g_rode || g_rodeByScene)
+                        Log("something the level moves is carrying her (%.3f %.3f %.3f a frame), Save waits till she's "
+                            "off it",
+                            step[0], step[1], step[2]);
+                    g_rode = true;
+                    g_rodeByScene = false;
+                    g_rodeAt = next.pos;
+                }
+            }
             if (g_runMs >= 2000 && std::fabs(g_runDy) >= 2.0f) {
                 if (!g_rode) Log("riding a lift (%.1f %s in %llu ms), Save waits till she's off it", std::fabs(g_runDy),
                                  g_runDy > 0 ? "up" : "down", g_runMs);
@@ -2659,7 +2703,7 @@ void Tick() {
                                                   (g_rodeByScene ? kOffScene : kOffRide);
             if (Steady(rise) && !carried && g_idleSolid && offRide) {
                 if (g_rode)
-                    Log("off %s, at %.2f %.2f %.2f", g_rodeByScene ? "where the scene left her" : "the lift", next.pos.v[0],
+                    Log("off %s, at %.2f %.2f %.2f", g_rodeByScene ? "where the scene left her" : "the ride", next.pos.v[0],
                         next.pos.v[1], next.pos.v[2]);
                 g_rode = false;
                 if (g_sanctioned.story >= 0) Remember(next.pos);
@@ -3317,7 +3361,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.39, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.42, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3363,7 +3407,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.39";
+    d.version = "0.25.42";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

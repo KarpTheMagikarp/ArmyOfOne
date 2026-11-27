@@ -111,7 +111,7 @@ def test_revert_takes_the_log_the_addon_writes():
     assert RUNTIME_LOGS["install_save_anywhere"] == ("xiii-save-anywhere.log", "xiii-save-anywhere.log.1",
                                                      "debug/pause-*.bin", "pause-*.bin")
     source = SOURCE.read_text(encoding="utf-8")
-    assert '"\\\\pause-%02d.bin"' in source and 'const std::string dir = Folder("debug");' in source
+    assert '"\\\\pause-%02d%s.bin"' in source and 'const std::string dir = Folder("debug");' in source
     assert '"\\\\xiii-save-anywhere.log"' in SOURCE.read_text(encoding="utf-8")
 
 
@@ -942,6 +942,29 @@ def test_save_stays_off_on_a_moving_piece_of_the_level():
     remember = remember[:remember.index("\n}\n")]
     assert "if (OnMovingPiece(at)) return;" in remember
 
+
+def test_a_platform_carrying_her_latches_like_a_lift():
+    """
+    Palumpolum Ch 7, Nov 26: the ray loses a platform once its leg starts, so a
+    pause mid-ride read nothing under her and a save there floated her on load.
+    A ray latch and a timer both held Save off the whole area, its platforms
+    never stop. Her controller has what the ground under her moved this frame:
+    nought on floor, noise on a parked piece, the platform's step on a moving
+    one. Any real step latches the lift latch there and keeps moving it along,
+    so it's 6 m off where the ride ended
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr size_t kControllerCarry = 0x7C;" in source
+    assert "constexpr float kCarryMoving = 0.002f;" in source
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    carry = tick[tick.index("ctrl + kControllerCarry"):tick.index("if (g_runMs >= 2000")]
+    assert "> kCarryMoving) {" in carry
+    assert "g_rode = true;" in carry and "g_rodeByScene = false;" in carry and "g_rodeAt = next.pos;" in carry
+    # read before the walk-off check in the same step, so a ride never clears itself
+    assert tick.index("ctrl + kControllerCarry") < tick.index("const bool offRide")
+    # and no timer: a level whose platforms never stop kept Save off everywhere
+    assert "kPieceTripMs" not in source and "g_roamedThisField" not in source
 
 def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     """
