@@ -970,6 +970,66 @@ def test_a_platform_carrying_her_latches_like_a_lift():
     # and no timer: a level whose platforms never stop kept Save off everywhere
     assert "kPieceTripMs" not in source and "g_roamedThisField" not in source
 
+def test_her_controller_says_what_ground_shes_on_and_the_ray_only_backs_it_up():
+    """
+    Gran Pulse and Nautilus read layer 16 under plain ground all over, so the
+    ray held Save off in patches for no reason (Nov 27). Her controller's
+    +0x88 is exactly 1 on the level's own ground and 0 on anything it moves,
+    parked or not, across 48 pauses. The ray only gets the say with no
+    controller, or where a cutscene moved a piece, the Ch 9 slab's case
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr size_t kControllerGround = 0x88;" in source
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert "ctrl + kControllerGround) != 1.0f) return kOnPiece;" in withheld
+    assert "if ((!ctrl || g_cutscenePosed) && OnMovingPiece(at))" in withheld
+    assert withheld.index("kControllerGround") < withheld.index("OnMovingPiece(at)")
+    bg = source[source.index("int __fastcall BgAnimHook("):]
+    bg = bg[:bg.index("\n}\n")]
+    assert "if (rva == kCutsceneBgAnimA || rva == kCutsceneBgAnimB) g_cutscenePosed = true;" in bg
+    forget = source[source.index("void ForgetWorld(const char* why) {"):]
+    assert "g_cutscenePosed = false;" in forget[:forget.index("\n}\n")]
+
+def test_the_party_stepping_off_for_a_chocobo_isnt_a_chara_a_load_misses():
+    """
+    Gran Pulse, Nov 27: climbing on a chocobo is a scene that lets Hope and
+    Fang go and loads the bird, so Save stayed off till the next station. The
+    game's own save keeps you riding and gives them back at the dismount. So
+    the let-gos of the scene that loads the chocobo are undone, and those names
+    sit out the count till the next station. Anything else still counts
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert 'constexpr char kChocobo[] = "f112_pc";' in source
+    hook = source[source.index("int __fastcall CharaInHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "Name(name) == kChocobo" in hook
+    assert "g_charaNet[who] += 1;" in hook and "g_rideParty.insert(who);" in hook
+    assert "g_sceneLetGo.clear();" in hook
+    native = source[source.index("void NoteNative(Op op, void* vm, bool on) {"):]
+    native = native[:native.index("\n}\n")]
+    assert "if (!g_rideParty.count(name)) {" in native and "if (!on) g_sceneLetGo.push_back(name);" in native
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    roam = tick[tick.index("free roam\n    // starts the list again every frame"):]
+    assert roam.index("if (state == kStateFieldIdle) {") < roam.index("g_sceneLetGo.clear();")
+    # a station or a new field forgets the riders with everything else
+    assert source.count("g_rideParty.clear();") == 2
+
+def test_walking_off_the_spot_settles_the_landing_so_a_later_hop_isnt_a_fall():
+    """
+    Gran Pulse, Nov 27: loaded on a ridge, walked a few metres off, came back
+    and hopped down the ledge beside the spot inside the land check's window.
+    That read as falling through the spot's floor, so Save went off till a
+    station. A fall through happens before she can walk anywhere, so seen at
+    the spot and then 3 m off it on the level settles it
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void TickLoad(int state) {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "if (g_landSeenAt && flat >= 3.0f && flat < 1e8f && std::fabs(drop) < 1.0f) {" in tick
+    assert tick.index("if (g_landSeenAt && flat >= 3.0f") < tick.index("if (flat < 3.0f && drop > 1.5f")
+
 def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     """
     every load ends 1.6 to 1.8 m forward of where it set her down, a station's

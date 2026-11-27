@@ -44,6 +44,7 @@
 #include <cwctype>
 #include <string>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace {
@@ -143,6 +144,10 @@ constexpr size_t kControllerAt = 0x1A8, kControllerAimY = 0x1BC;
 // matched the Ch 7 shaft platform's climb in direction and speed (Nov 27)
 constexpr size_t kControllerCarry = 0x7C;
 constexpr float kCarryMoving = 0.002f;
+// and the w after it says what kind of ground that is: exactly 1 on the level's
+// own, 0 on anything it moves, parked or not. 48 pauses over Palumpolum,
+// Nautilus and Gran Pulse never once had it wrong (Nov 27)
+constexpr size_t kControllerGround = 0x88;
 constexpr unsigned char kSetMatrixHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x89, 0x4D, 0xB4};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
@@ -785,6 +790,10 @@ ULONGLONG g_heightTraceUntil = 0, g_heightTraceAt = 0;
 // everywhere and has none (Nov 23); the Ch 9 slab and the Ch 10 lift are
 // bg anims, and every drop was in a field with them
 std::atomic<bool> g_fieldAnimates{false};
+// one of those was a cutscene's, which is how the Ch 9 lift and its slab got
+// where they were. The ray keeps the say there, nobody's read the controller
+// on that slab yet
+std::atomic<bool> g_cutscenePosed{false};
 // the leader the setMatrix watch is after, and till when
 std::atomic<void*> g_watchActor{nullptr};
 std::atomic<ULONGLONG> g_watchUntil{0};
@@ -814,6 +823,14 @@ unsigned g_lockedAtSanction = 0;
 // charas made less charas let go since the last station, by name. One made
 // and let go inside a scene (an event enemy) leaves nothing a load misses
 std::map<std::string, int> g_charaNet;
+// climbing on a chocobo is a scene that lets the party go and loads the bird.
+// The game's own save keeps you riding and gives them back when you get off
+// (Gran Pulse, Nov 27: saves on the bird loaded on it, and Hope and Fang came
+// back at the next dismount). So those let-gos don't count, and neither does
+// anything else they do till the next station
+constexpr char kChocobo[] = "f112_pc";
+std::vector<std::string> g_sceneLetGo;
+std::set<std::string> g_rideParty;
 
 bool CharasMoved() {
     EnterCriticalSection(&g_worldLock);
@@ -863,11 +880,14 @@ void ForgetWorld(const char* why) {
     const size_t had = g_world.size();
     g_world.clear();
     g_fieldAnimates = false;
+    g_cutscenePosed = false;
     g_holding = false;
     g_worldZone = ZoneNumber();
     // the charas and talk changes of a field that's gone are gone with it.
     // What the new field's own setup does from here still counts
     g_charaNet.clear();
+    g_sceneLetGo.clear();
+    g_rideParty.clear();
     g_lockedAtSanction = g_lockedNotes.load();
     LeaveCriticalSection(&g_worldLock);
     if (had) Trace("world journal cleared (%s), had %u", why, static_cast<unsigned>(had));
@@ -992,6 +1012,7 @@ int __fastcall BgAnimHook(void* scene, void* edx, const char* object, int arg, c
     const int out = g_bgAnim(scene, edx, object, arg, motion, mode);
     if (kept) {
         g_fieldAnimates = true;
+        if (rva == kCutsceneBgAnimA || rva == kCutsceneBgAnimB) g_cutscenePosed = true;
         Note(Op::BgAnim, object, motion, arg, mode);
     }
     return out;
@@ -1074,6 +1095,18 @@ int __fastcall CharaSetOutHook(void* loader, void* edx, const char* name) {
 
 int __fastcall CharaInHook(void* loader, void* edx, const char* name, int arg) {
     TraceLoad("chara in", name, __builtin_return_address(0));
+    if (Named(name) && Name(name) == kChocobo) {
+        std::string party;
+        EnterCriticalSection(&g_worldLock);
+        for (const std::string& who : g_sceneLetGo) {
+            g_charaNet[who] += 1;
+            g_rideParty.insert(who);
+            party += " " + who;
+        }
+        g_sceneLetGo.clear();
+        LeaveCriticalSection(&g_worldLock);
+        if (!party.empty()) Log("the party stepped off for the chocobo (%s ), the save keeps that", party.c_str() + 1);
+    }
     return g_charaIn(loader, edx, name, arg);
 }
 
@@ -1119,7 +1152,11 @@ void NoteNative(Op op, void* vm, bool on) {
     Note(op, target, nullptr, on, 0);
     if (op == Op::Chara && target) {
         EnterCriticalSection(&g_worldLock);
-        g_charaNet[Name(target)] += on ? 1 : -1;
+        const std::string name = Name(target);
+        if (!g_rideParty.count(name)) {
+            g_charaNet[name] += on ? 1 : -1;
+            if (!on) g_sceneLetGo.push_back(name);
+        }
         LeaveCriticalSection(&g_worldLock);
     }
     Trace("  world: %s %s, slots%s", kOpNames[static_cast<int>(op)], on ? "set" : "cleared", raw);
@@ -2062,9 +2099,16 @@ const char* Withheld() {
     // last, being calls into the engine
     Vec4 at{};
     if (!Position(PlayerHandle(), at)) return nullptr;
-    if (OnMovingPiece(at))
-        return "she's standing on something the level moves (a lift, the slab beside one), which a load can't set "
-               "her back on";
+    constexpr const char* kOnPiece =
+        "she's standing on something the level moves (a lift, the slab beside one), which a load can't set her back on";
+    // her controller knows what she's on. The ray only knows layer 16, which
+    // Gran Pulse and Nautilus put under plain ground all over, and Save went
+    // missing there in patches for no reason (Nov 27)
+    const auto* ctrl = *reinterpret_cast<const unsigned char**>(g_base + kFieldPlayerRva);
+    if (ctrl && *reinterpret_cast<const float*>(ctrl + kControllerGround) != 1.0f) return kOnPiece;
+    if ((!ctrl || g_cutscenePosed) && OnMovingPiece(at))
+        return "she's over something a cutscene moved here (the ray reads it under her), which a load can't set her "
+               "back on";
     return nullptr;
 }
 
@@ -2360,6 +2404,8 @@ void Sanctify(const char* where, bool baseline = true) {
         EnterCriticalSection(&g_worldLock);
         g_lockedAtSanction = g_lockedNotes.load();
         g_charaNet.clear();
+        g_sceneLetGo.clear();
+        g_rideParty.clear();
         LeaveCriticalSection(&g_worldLock);
     }
     g_trailCount = 0;
@@ -2387,6 +2433,17 @@ void TickLoad(int state) {
     const float flat = read && !standIn ? std::hypot(at.v[0] - g_landTarget.v[0], at.v[2] - g_landTarget.v[2]) : 1e9f;
     const float drop = g_landTarget.v[1] - at.v[1];
     if (g_worldCheckWanted) return;
+    // seen at the spot, then walked a few metres off it on the level: the
+    // floor held her. A fall through it happens before she can get anywhere,
+    // and hopping off a ledge next to the spot later is just a hop (Gran
+    // Pulse, Nov 27: walked off, came back, jumped down, and Save went off
+    // till a station)
+    if (g_landSeenAt && flat >= 3.0f && flat < 1e8f && std::fabs(drop) < 1.0f) {
+        Log("landed at the spot, she walked off it to %.2f %.2f %.2f", at.v[0], at.v[1], at.v[2]);
+        g_landCheckAt = 0;
+        g_spawn.armed = false;
+        return;
+    }
     // straight down: a walk or a hop off a step covers more ground than
     // height, and 0.25.13 read a jump next to the spot as a fall (Nov 23)
     if (flat < 3.0f && drop > 1.5f && flat < 0.5f * drop) {
@@ -2734,6 +2791,13 @@ void Tick() {
         ReadProgress(g_sceneStart);
         g_sceneFromRead = Position(PlayerHandle(), g_sceneFrom);
         Log("scene (state %d)", state);
+    }
+    // only a scene's own let-gos ride on the chocobo it brings in: free roam
+    // starts the list again every frame
+    if (state == kStateFieldIdle) {
+        EnterCriticalSection(&g_worldLock);
+        g_sceneLetGo.clear();
+        LeaveCriticalSection(&g_worldLock);
     }
     if (InScene(state)) g_wasScene = true;
     else if (g_wasScene && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 500) {
@@ -3366,7 +3430,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.43, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.46, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3412,7 +3476,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.43";
+    d.version = "0.25.46";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
