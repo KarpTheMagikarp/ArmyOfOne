@@ -6,7 +6,7 @@ XIII-2 and Lightning Returns) on Steam.**
 [![Downloads](https://img.shields.io/github/downloads/KarpTheMagikarp/ArmyOfOne/total)](../../releases)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
-<!-- demo GIF goes here, linking to the full video -->
+![ArmyOfOne patching Final Fantasy XIII, from the start screen to all patches applied](docs/demo.avif)
 
 The Final Fantasy XIII trilogy on Steam unfortunately needs a pile of community
 fixes before it runs the way it should, and setting them up usually means an
