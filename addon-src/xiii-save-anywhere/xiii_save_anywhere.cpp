@@ -138,6 +138,11 @@ constexpr DWORD kSetMatrixRva = 0x3C1970, kControllerWriteRva = 0x227683;
 constexpr DWORD kFieldPlayerRva = 0x23FF554;
 constexpr size_t kFieldPlayerFlags = 0x154, kFieldPlayerSpan = 0x600;
 constexpr size_t kControllerAt = 0x1A8, kControllerAimY = 0x1BC;
+// what the ground under her moved this frame: exactly nought on the level's own
+// floor, 1e-6 noise on a parked platform, and on a moving one its step, which
+// matched the Ch 7 shaft platform's climb in direction and speed (Nov 27)
+constexpr size_t kControllerCarry = 0x7C;
+constexpr float kCarryMoving = 0.002f;
 constexpr unsigned char kSetMatrixHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x89, 0x4D, 0xB4};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
@@ -770,17 +775,6 @@ bool g_worldCheckWanted = false;
 // free roam since the load, which a pause only holds: checking right after
 // loading paused the check too, and Save stayed off a good while (Nov 16)
 ULONGLONG g_roamMs = 0, g_roamAt = 0;
-// a script moving a piece of the level out in free roam is a platform being
-// called or sent, and the ray can't see one mid-leg (Palumpolum Ch 7, Nov 26:
-// a save on a platform it lost floated her on load). A ray latch on top of it
-// went wrong there too, since that level calls half its plain floor movable.
-// So Save waits out the trip on the clock, in free roam time since the field
-// stands still while paused. The platforms there take about 7 s a leg
-constexpr ULONGLONG kPieceTripMs = 20000;
-ULONGLONG g_pieceTripMs = 0;
-// a load's own script poses them all before she's ever in free roam, parked
-// where the flags say, and that's no trip
-bool g_roamedThisField = false;
 // the note count once it was her and not the stand-in after the load: an area
 // box after that is one she walked through, the stand-in's box isn't hers
 unsigned g_realFrom = ~0u;
@@ -998,10 +992,6 @@ int __fastcall BgAnimHook(void* scene, void* edx, const char* object, int arg, c
     const int out = g_bgAnim(scene, edx, object, arg, motion, mode);
     if (kept) {
         g_fieldAnimates = true;
-        if (g_roamedThisField) {
-            if (!g_pieceTripMs) Log("%s is moving, Save waits till it's parked", object);
-            g_pieceTripMs = kPieceTripMs;
-        }
         Note(Op::BgAnim, object, motion, arg, mode);
     }
     return out;
@@ -2053,8 +2043,7 @@ const char* Withheld() {
     }
     if (g_rode)
         return g_rodeByScene ? "a scene moved her and she hasn't walked off where it left her yet"
-                             : "she rode a lift and hasn't walked off it yet";
-    if (g_pieceTripMs) return "something the level moves (a platform) started moving, Save waits till it's parked";
+                             : "she rode a lift or a platform and hasn't walked off it yet";
     // near the floor only counts with ground walked since the last scene or
     // station behind it: if the spot's floor is gone on load, that's where she
     // lands instead of a station that may sit on the far side of the scene
@@ -2615,11 +2604,7 @@ void Tick() {
     if (state != kStateFieldIdle) g_idleSince = 0;
     else if (!g_idleSince) g_idleSince = now;
     if (state == kStateFieldIdle) {
-        g_roamedThisField = true;
-        if (g_roamAt) {
-            g_roamMs += now - g_roamAt;
-            g_pieceTripMs -= std::min(g_pieceTripMs, now - g_roamAt);
-        }
+        if (g_roamAt) g_roamMs += now - g_roamAt;
         g_roamAt = now;
     } else {
         g_roamAt = 0;
@@ -2632,8 +2617,6 @@ void Tick() {
         g_idleSolid = false;
         g_nearFloor = false;
         g_rode = false;
-        g_pieceTripMs = 0;
-        g_roamedThisField = false;
         g_runDy = 0;
         g_runMs = 0;
         // a field change after the point means it's not this field's any more
@@ -2678,6 +2661,22 @@ void Tick() {
                 g_runMs = 0;
             }
             const bool carried = Carried();
+            // a platform the ray lost mid-leg still moves her through her own
+            // controller (Palumpolum Ch 7, Nov 26: a save on one floated her on
+            // load). Every carried step moves the latch along, so 6 m off is
+            // measured from where the ride ended, whatever it was
+            if (auto* ctrl = *reinterpret_cast<const unsigned char**>(g_base + kFieldPlayerRva)) {
+                const auto* step = reinterpret_cast<const float*>(ctrl + kControllerCarry);
+                if (std::fabs(step[0]) + std::fabs(step[1]) + std::fabs(step[2]) > kCarryMoving) {
+                    if (!g_rode || g_rodeByScene)
+                        Log("something the level moves is carrying her (%.3f %.3f %.3f a frame), Save waits till she's "
+                            "off it",
+                            step[0], step[1], step[2]);
+                    g_rode = true;
+                    g_rodeByScene = false;
+                    g_rodeAt = next.pos;
+                }
+            }
             if (g_runMs >= 2000 && std::fabs(g_runDy) >= 2.0f) {
                 if (!g_rode) Log("riding a lift (%.1f %s in %llu ms), Save waits till she's off it", std::fabs(g_runDy),
                                  g_runDy > 0 ? "up" : "down", g_runMs);
@@ -2704,22 +2703,15 @@ void Tick() {
                                                   (g_rodeByScene ? kOffScene : kOffRide);
             if (Steady(rise) && !carried && g_idleSolid && offRide) {
                 if (g_rode)
-                    Log("off %s, at %.2f %.2f %.2f", g_rodeByScene ? "where the scene left her" : "the lift", next.pos.v[0],
+                    Log("off %s, at %.2f %.2f %.2f", g_rodeByScene ? "where the scene left her" : "the ride", next.pos.v[0],
                         next.pos.v[1], next.pos.v[2]);
                 g_rode = false;
-                // ground mid-trip may be the platform, and a path that skips it
-                // would join across ground she never walked
-                if (g_pieceTripMs) {
+                if (g_sanctioned.story >= 0) Remember(next.pos);
+                if (g_seedPath.exchange(false)) {
                     g_pathCount = 0;
-                    g_seedPath = false;
-                } else {
-                    if (g_sanctioned.story >= 0) Remember(next.pos);
-                    if (g_seedPath.exchange(false)) {
-                        g_pathCount = 0;
-                        NotePath(g_seedFrom);
-                    }
-                    NotePath(next.pos);
+                    NotePath(g_seedFrom);
                 }
+                NotePath(next.pos);
             } else {
                 g_pathCount = 0;
             }
@@ -3369,7 +3361,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.41, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.42, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3415,7 +3407,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.41";
+    d.version = "0.25.42";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

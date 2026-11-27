@@ -943,36 +943,28 @@ def test_save_stays_off_on_a_moving_piece_of_the_level():
     assert "if (OnMovingPiece(at)) return;" in remember
 
 
-def test_save_waits_out_a_platforms_trip_in_free_roam_time():
+def test_a_platform_carrying_her_latches_like_a_lift():
     """
-    Palumpolum Ch 7, Nov 26: the ray loses a platform once its leg starts, so
-    pauses mid-ride read nothing under her and a save there floated her on
-    load. A ray latch didn't work either, that level calls half its plain floor
-    movable. So a script moving a piece once she's been in free roam holds Save
-    for 20 s of free roam, which a pause doesn't run down, and a load's own
-    posing of the pieces doesn't count. The lift and scene latches still clear
-    the same, only the trail and walk-in path skip the trip
+    Palumpolum Ch 7, Nov 26: the ray loses a platform once its leg starts, so a
+    pause mid-ride read nothing under her and a save there floated her on load.
+    A ray latch and a timer both held Save off the whole area, its platforms
+    never stop. Her controller has what the ground under her moved this frame:
+    nought on floor, noise on a parked piece, the platform's step on a moving
+    one. Any real step latches the lift latch there and keeps moving it along,
+    so it's 6 m off where the ride ended
     """
     source = SOURCE.read_text(encoding="utf-8")
-    assert "constexpr ULONGLONG kPieceTripMs = 20000;" in source
-    bg = source[source.index("int __fastcall BgAnimHook("):]
-    bg = bg[:bg.index("\n}\n")]
-    assert bg.index("if (kept) {") < bg.index("if (g_roamedThisField) {") < bg.index("g_pieceTripMs = kPieceTripMs;")
+    assert "constexpr size_t kControllerCarry = 0x7C;" in source
+    assert "constexpr float kCarryMoving = 0.002f;" in source
     tick = source[source.index("void Tick() {"):]
     tick = tick[:tick.index("\n}\n")]
-    roam = tick[tick.index("if (state == kStateFieldIdle) {"):tick.index("} else {")]
-    assert "g_roamedThisField = true;" in roam
-    assert "g_pieceTripMs -= std::min(g_pieceTripMs, now - g_roamAt);" in roam
-    field = tick[tick.index("if (state == 1 || state == 2) {"):]
-    field = field[:field.index("g_restartPoint = false;")]
-    assert "g_pieceTripMs = 0;" in field and "g_roamedThisField = false;" in field
-    walked = tick[tick.index("if (Steady(rise) && !carried && g_idleSolid && offRide) {"):]
-    walked = walked[:walked.index("} else {\n                g_pathCount = 0;")]
-    assert walked.index("g_rode = false;") < walked.index("if (g_pieceTripMs) {")
-    assert walked.index("g_seedPath = false;") < walked.index("Remember(next.pos)")
-    withheld = source[source.index("const char* Withheld() {"):]
-    withheld = withheld[:withheld.index("\n}\n")]
-    assert withheld.index("if (g_rode)") < withheld.index("if (g_pieceTripMs)") < withheld.index("if (!g_idleSolid")
+    carry = tick[tick.index("ctrl + kControllerCarry"):tick.index("if (g_runMs >= 2000")]
+    assert "> kCarryMoving) {" in carry
+    assert "g_rode = true;" in carry and "g_rodeByScene = false;" in carry and "g_rodeAt = next.pos;" in carry
+    # read before the walk-off check in the same step, so a ride never clears itself
+    assert tick.index("ctrl + kControllerCarry") < tick.index("const bool offRide")
+    # and no timer: a level whose platforms never stop kept Save off everywhere
+    assert "kPieceTripMs" not in source and "g_roamedThisField" not in source
 
 def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     """
@@ -1023,7 +1015,7 @@ def test_a_load_starts_her_back_along_where_she_walked_in_so_the_ease_in_ends_on
     assert "walk.at[walk.count++] = spot;" in find
     # crumbs only on steady ground off any ride, and the path restarts with the trail
     tick = source[source.index("void Tick() {"):]
-    assert "NotePath(next.pos);\n                }\n            } else {\n                g_pathCount = 0;" in tick
+    assert "NotePath(next.pos);\n            } else {\n                g_pathCount = 0;" in tick
     import re
     resets = re.findall(r"\n( +)g_trailCount = 0;\n( +)(\w+)", source)
     assert resets and all(a == b and name == "g_pathCount" for a, b, name in resets)
