@@ -111,7 +111,7 @@ def test_revert_takes_the_log_the_addon_writes():
     assert RUNTIME_LOGS["install_save_anywhere"] == ("xiii-save-anywhere.log", "xiii-save-anywhere.log.1",
                                                      "debug/pause-*.bin", "pause-*.bin")
     source = SOURCE.read_text(encoding="utf-8")
-    assert '"\\\\pause-%02d.bin"' in source and 'const std::string dir = Folder("debug");' in source
+    assert '"\\\\pause-%02d%s.bin"' in source and 'const std::string dir = Folder("debug");' in source
     assert '"\\\\xiii-save-anywhere.log"' in SOURCE.read_text(encoding="utf-8")
 
 

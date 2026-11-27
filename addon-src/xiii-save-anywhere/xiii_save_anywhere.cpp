@@ -1485,10 +1485,60 @@ float WalkHeight(const Walk& walk, float x, float z, float* side = nullptr, floa
     return b.v[1];
 }
 
+// a block and what it points at, one hop out, for the dumps below
+struct Hops {
+    int count = 0;
+    DWORD from[64]{}, to[64]{}, size[64]{};
+    unsigned char bytes[64][0x400]{};
+};
+
+void Hop(const unsigned char* copy, size_t got, Hops& out) {
+    out.count = 0;
+    // heap pointers only: the exe's own tables are the same for everyone
+    const auto image = g_base;
+    for (size_t off = 0; off + 4 <= got && out.count < 64; off += 4) {
+        const DWORD to = *reinterpret_cast<const DWORD*>(copy + off);
+        if (to < 0x10000 || (to >= image && to < image + 0x2A00000) || to >= 0x7FFF0000 || (to & 3)) continue;
+        bool seen = false;
+        for (int i = 0; i < out.count && !seen; ++i) seen = out.to[i] == to;
+        if (seen) continue;
+        const size_t n = Readable(reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(to)),
+                                  out.bytes[out.count], sizeof out.bytes[0]);
+        if (!n) continue;
+        out.from[out.count] = static_cast<DWORD>(off);
+        out.to[out.count] = to;
+        out.size[out.count] = static_cast<DWORD>(n);
+        ++out.count;
+    }
+}
+
+void WriteDump(int dump, const char* what, const unsigned char* copy, size_t got, const Hops& hops) {
+    const std::string dir = Folder("debug");
+    char name[48];
+    std::snprintf(name, sizeof name, "\\pause-%02d%s.bin", dump, what);
+    FILE* file = nullptr;
+    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
+        fwrite(copy, 1, got, file);
+        fclose(file);
+    }
+    // each hop: where in the block it was found, where it points, how much, the bytes
+    std::snprintf(name, sizeof name, "\\pause-%02d%s-hops.bin", dump, what);
+    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
+        for (int i = 0; i < hops.count; ++i) {
+            fwrite(&hops.from[i], 4, 1, file);
+            fwrite(&hops.to[i], 4, 1, file);
+            fwrite(&hops.size[i], 4, 1, file);
+            fwrite(hops.bytes[i], 1, hops.size[i], file);
+        }
+        fclose(file);
+    }
+}
+
 // Debug only: the leader's actor, raw, once per pause, to find what she's
 // standing on by comparing a pause on plain floor with one on a platform.
-// Plus what it points at, one hop out, since the ground she's on more likely
-// sits in her controller than in the actor itself. Only pages VirtualQuery
+// The actor and one hop out had nothing that tells a ride from floor
+// (Palumpolum, Nov 26), so her controller goes too, the thing that walks her
+// and so the likeliest to know what's carrying her. Only pages VirtualQuery
 // says are committed and readable get copied
 void DumpActor() {
     static int dumps = 0;
@@ -1496,52 +1546,25 @@ void DumpActor() {
     unsigned char* registry = *g_actorRegistry;
     if (!registry) return;
     static unsigned char copy[0x1000];
-    static unsigned char hops[64][0x400];
-    static DWORD hopFrom[64], hopTo[64], hopSize[64];
-    int hopCount = 0;
+    static Hops hops;
     std::memset(copy, 0, sizeof copy);
     Vec4 at{};
     g_lock(registry + 0x6C0, nullptr, nullptr);
     unsigned char* actor = g_resolveActor(registry, nullptr, static_cast<int>(PlayerHandle()));
     const size_t got = actor ? Readable(actor, copy, sizeof copy) : 0;
-    // heap pointers only: the exe's own tables are the same for everyone
-    const auto image = g_base;
-    for (size_t off = 0; off + 4 <= got && hopCount < 64; off += 4) {
-        const DWORD to = *reinterpret_cast<DWORD*>(copy + off);
-        if (to < 0x10000 || (to >= image && to < image + 0x2A00000) || to >= 0x7FFF0000 || (to & 3)) continue;
-        bool seen = false;
-        for (int i = 0; i < hopCount && !seen; ++i) seen = hopTo[i] == to;
-        if (seen) continue;
-        const size_t n = Readable(reinterpret_cast<const unsigned char*>(static_cast<std::uintptr_t>(to)), hops[hopCount],
-                                  sizeof hops[0]);
-        if (!n) continue;
-        hopFrom[hopCount] = static_cast<DWORD>(off);
-        hopTo[hopCount] = to;
-        hopSize[hopCount] = static_cast<DWORD>(n);
-        ++hopCount;
-    }
+    Hop(copy, got, hops);
+    const int hopCount = hops.count;
     if (actor) std::memcpy(at.v, actor + kActorTranslation, sizeof at.v);
     g_unlock(registry + 0x6C0, nullptr);
     if (!actor || !got) return;
-    const std::string dir = Folder("debug");
-    char name[40];
     ++dumps;
-    std::snprintf(name, sizeof name, "\\pause-%02d.bin", dumps);
-    FILE* file = nullptr;
-    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
-        fwrite(copy, 1, got, file);
-        fclose(file);
-    }
-    // each hop: where in the actor it was found, where it points, how much, the bytes
-    std::snprintf(name, sizeof name, "\\pause-%02d-hops.bin", dumps);
-    if (fopen_s(&file, (dir + name).c_str(), "wb") == 0 && file) {
-        for (int i = 0; i < hopCount; ++i) {
-            fwrite(&hopFrom[i], 4, 1, file);
-            fwrite(&hopTo[i], 4, 1, file);
-            fwrite(&hopSize[i], 4, 1, file);
-            fwrite(hops[i], 1, hopSize[i], file);
-        }
-        fclose(file);
+    WriteDump(dumps, "", copy, got, hops);
+    static unsigned char ctrlCopy[kFieldPlayerSpan];
+    static Hops ctrlHops;
+    if (auto* ctrl = *reinterpret_cast<unsigned char**>(g_base + kFieldPlayerRva)) {
+        const size_t ctrlGot = Readable(ctrl, ctrlCopy, sizeof ctrlCopy);
+        Hop(ctrlCopy, ctrlGot, ctrlHops);
+        if (ctrlGot) WriteDump(dumps, "-ctrl", ctrlCopy, ctrlGot, ctrlHops);
     }
     // how she was moving just before, so each dump says what it was
     float rise = 0;
@@ -3346,7 +3369,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.40, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.41, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3392,7 +3415,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.40";
+    d.version = "0.25.41";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
