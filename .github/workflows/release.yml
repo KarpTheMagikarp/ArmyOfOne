@@ -75,7 +75,6 @@ jobs:
           files: |
             ArmyOfOne-windows.zip
             manifests/*.json
-          generate_release_notes: true
           # a release made on the site already has its notes, so these go under
           # them rather than over them
           append_body: true
