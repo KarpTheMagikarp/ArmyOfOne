@@ -44,6 +44,7 @@
 #include <cwctype>
 #include <string>
 #include <map>
+#include <set>
 #include <vector>
 
 namespace {
@@ -822,6 +823,14 @@ unsigned g_lockedAtSanction = 0;
 // charas made less charas let go since the last station, by name. One made
 // and let go inside a scene (an event enemy) leaves nothing a load misses
 std::map<std::string, int> g_charaNet;
+// climbing on a chocobo is a scene that lets the party go and loads the bird.
+// The game's own save keeps you riding and gives them back when you get off
+// (Gran Pulse, Nov 27: saves on the bird loaded on it, and Hope and Fang came
+// back at the next dismount). So those let-gos don't count, and neither does
+// anything else they do till the next station
+constexpr char kChocobo[] = "f112_pc";
+std::vector<std::string> g_sceneLetGo;
+std::set<std::string> g_rideParty;
 
 bool CharasMoved() {
     EnterCriticalSection(&g_worldLock);
@@ -877,6 +886,8 @@ void ForgetWorld(const char* why) {
     // the charas and talk changes of a field that's gone are gone with it.
     // What the new field's own setup does from here still counts
     g_charaNet.clear();
+    g_sceneLetGo.clear();
+    g_rideParty.clear();
     g_lockedAtSanction = g_lockedNotes.load();
     LeaveCriticalSection(&g_worldLock);
     if (had) Trace("world journal cleared (%s), had %u", why, static_cast<unsigned>(had));
@@ -1084,6 +1095,18 @@ int __fastcall CharaSetOutHook(void* loader, void* edx, const char* name) {
 
 int __fastcall CharaInHook(void* loader, void* edx, const char* name, int arg) {
     TraceLoad("chara in", name, __builtin_return_address(0));
+    if (Named(name) && Name(name) == kChocobo) {
+        std::string party;
+        EnterCriticalSection(&g_worldLock);
+        for (const std::string& who : g_sceneLetGo) {
+            g_charaNet[who] += 1;
+            g_rideParty.insert(who);
+            party += " " + who;
+        }
+        g_sceneLetGo.clear();
+        LeaveCriticalSection(&g_worldLock);
+        if (!party.empty()) Log("the party stepped off for the chocobo (%s ), the save keeps that", party.c_str() + 1);
+    }
     return g_charaIn(loader, edx, name, arg);
 }
 
@@ -1129,7 +1152,11 @@ void NoteNative(Op op, void* vm, bool on) {
     Note(op, target, nullptr, on, 0);
     if (op == Op::Chara && target) {
         EnterCriticalSection(&g_worldLock);
-        g_charaNet[Name(target)] += on ? 1 : -1;
+        const std::string name = Name(target);
+        if (!g_rideParty.count(name)) {
+            g_charaNet[name] += on ? 1 : -1;
+            if (!on) g_sceneLetGo.push_back(name);
+        }
         LeaveCriticalSection(&g_worldLock);
     }
     Trace("  world: %s %s, slots%s", kOpNames[static_cast<int>(op)], on ? "set" : "cleared", raw);
@@ -2377,6 +2404,8 @@ void Sanctify(const char* where, bool baseline = true) {
         EnterCriticalSection(&g_worldLock);
         g_lockedAtSanction = g_lockedNotes.load();
         g_charaNet.clear();
+        g_sceneLetGo.clear();
+        g_rideParty.clear();
         LeaveCriticalSection(&g_worldLock);
     }
     g_trailCount = 0;
@@ -2751,6 +2780,13 @@ void Tick() {
         ReadProgress(g_sceneStart);
         g_sceneFromRead = Position(PlayerHandle(), g_sceneFrom);
         Log("scene (state %d)", state);
+    }
+    // only a scene's own let-gos ride on the chocobo it brings in: free roam
+    // starts the list again every frame
+    if (state == kStateFieldIdle) {
+        EnterCriticalSection(&g_worldLock);
+        g_sceneLetGo.clear();
+        LeaveCriticalSection(&g_worldLock);
     }
     if (InScene(state)) g_wasScene = true;
     else if (g_wasScene && state == kStateFieldIdle && g_idleSince && now - g_idleSince > 500) {
@@ -3383,7 +3419,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.44, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.45, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3429,7 +3465,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.44";
+    d.version = "0.25.45";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

@@ -991,6 +991,31 @@ def test_her_controller_says_what_ground_shes_on_and_the_ray_only_backs_it_up():
     forget = source[source.index("void ForgetWorld(const char* why) {"):]
     assert "g_cutscenePosed = false;" in forget[:forget.index("\n}\n")]
 
+def test_the_party_stepping_off_for_a_chocobo_isnt_a_chara_a_load_misses():
+    """
+    Gran Pulse, Nov 27: climbing on a chocobo is a scene that lets Hope and
+    Fang go and loads the bird, so Save stayed off till the next station. The
+    game's own save keeps you riding and gives them back at the dismount. So
+    the let-gos of the scene that loads the chocobo are undone, and those names
+    sit out the count till the next station. Anything else still counts
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert 'constexpr char kChocobo[] = "f112_pc";' in source
+    hook = source[source.index("int __fastcall CharaInHook("):]
+    hook = hook[:hook.index("\n}\n")]
+    assert "Name(name) == kChocobo" in hook
+    assert "g_charaNet[who] += 1;" in hook and "g_rideParty.insert(who);" in hook
+    assert "g_sceneLetGo.clear();" in hook
+    native = source[source.index("void NoteNative(Op op, void* vm, bool on) {"):]
+    native = native[:native.index("\n}\n")]
+    assert "if (!g_rideParty.count(name)) {" in native and "if (!on) g_sceneLetGo.push_back(name);" in native
+    tick = source[source.index("void Tick() {"):]
+    tick = tick[:tick.index("\n}\n")]
+    roam = tick[tick.index("free roam\n    // starts the list again every frame"):]
+    assert roam.index("if (state == kStateFieldIdle) {") < roam.index("g_sceneLetGo.clear();")
+    # a station or a new field forgets the riders with everything else
+    assert source.count("g_rideParty.clear();") == 2
+
 def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     """
     every load ends 1.6 to 1.8 m forward of where it set her down, a station's
