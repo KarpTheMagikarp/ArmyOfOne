@@ -79,7 +79,12 @@ jobs:
           # a release made on the site already has its notes, so these go under
           # them rather than over them
           append_body: true
+          # the action joins with a single newline, which glued these onto the
+          # last line of the release's own notes
           body: |
+
+            ---
+
             Extract the zip anywhere and run `ArmyOfOne.exe`. Extract it first:
             run from inside the zip, the exe can't find the rest of itself.
 
