@@ -970,6 +970,27 @@ def test_a_platform_carrying_her_latches_like_a_lift():
     # and no timer: a level whose platforms never stop kept Save off everywhere
     assert "kPieceTripMs" not in source and "g_roamedThisField" not in source
 
+def test_her_controller_says_what_ground_shes_on_and_the_ray_only_backs_it_up():
+    """
+    Gran Pulse and Nautilus read layer 16 under plain ground all over, so the
+    ray held Save off in patches for no reason (Nov 27). Her controller's
+    +0x88 is exactly 1 on the level's own ground and 0 on anything it moves,
+    parked or not, across 48 pauses. The ray only gets the say with no
+    controller, or where a cutscene moved a piece, the Ch 9 slab's case
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "constexpr size_t kControllerGround = 0x88;" in source
+    withheld = source[source.index("const char* Withheld() {"):]
+    withheld = withheld[:withheld.index("\n}\n")]
+    assert "ctrl + kControllerGround) != 1.0f) return kOnPiece;" in withheld
+    assert "if ((!ctrl || g_cutscenePosed) && OnMovingPiece(at))" in withheld
+    assert withheld.index("kControllerGround") < withheld.index("OnMovingPiece(at)")
+    bg = source[source.index("int __fastcall BgAnimHook("):]
+    bg = bg[:bg.index("\n}\n")]
+    assert "if (rva == kCutsceneBgAnimA || rva == kCutsceneBgAnimB) g_cutscenePosed = true;" in bg
+    forget = source[source.index("void ForgetWorld(const char* why) {"):]
+    assert "g_cutscenePosed = false;" in forget[:forget.index("\n}\n")]
+
 def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     """
     every load ends 1.6 to 1.8 m forward of where it set her down, a station's

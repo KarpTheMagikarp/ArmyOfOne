@@ -143,6 +143,10 @@ constexpr size_t kControllerAt = 0x1A8, kControllerAimY = 0x1BC;
 // matched the Ch 7 shaft platform's climb in direction and speed (Nov 27)
 constexpr size_t kControllerCarry = 0x7C;
 constexpr float kCarryMoving = 0.002f;
+// and the w after it says what kind of ground that is: exactly 1 on the level's
+// own, 0 on anything it moves, parked or not. 48 pauses over Palumpolum,
+// Nautilus and Gran Pulse never once had it wrong (Nov 27)
+constexpr size_t kControllerGround = 0x88;
 constexpr unsigned char kSetMatrixHead[] = {0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x4C, 0x89, 0x4D, 0xB4};
 constexpr DWORD kPlayerHandleRva = 0x2C0810;    // cdecl(out), the chara you're controlling
 constexpr unsigned char kPlayerHandleHead[] = {0x55, 0x8B, 0xEC, 0x51, 0xA1};
@@ -785,6 +789,10 @@ ULONGLONG g_heightTraceUntil = 0, g_heightTraceAt = 0;
 // everywhere and has none (Nov 23); the Ch 9 slab and the Ch 10 lift are
 // bg anims, and every drop was in a field with them
 std::atomic<bool> g_fieldAnimates{false};
+// one of those was a cutscene's, which is how the Ch 9 lift and its slab got
+// where they were. The ray keeps the say there, nobody's read the controller
+// on that slab yet
+std::atomic<bool> g_cutscenePosed{false};
 // the leader the setMatrix watch is after, and till when
 std::atomic<void*> g_watchActor{nullptr};
 std::atomic<ULONGLONG> g_watchUntil{0};
@@ -863,6 +871,7 @@ void ForgetWorld(const char* why) {
     const size_t had = g_world.size();
     g_world.clear();
     g_fieldAnimates = false;
+    g_cutscenePosed = false;
     g_holding = false;
     g_worldZone = ZoneNumber();
     // the charas and talk changes of a field that's gone are gone with it.
@@ -992,6 +1001,7 @@ int __fastcall BgAnimHook(void* scene, void* edx, const char* object, int arg, c
     const int out = g_bgAnim(scene, edx, object, arg, motion, mode);
     if (kept) {
         g_fieldAnimates = true;
+        if (rva == kCutsceneBgAnimA || rva == kCutsceneBgAnimB) g_cutscenePosed = true;
         Note(Op::BgAnim, object, motion, arg, mode);
     }
     return out;
@@ -2062,9 +2072,16 @@ const char* Withheld() {
     // last, being calls into the engine
     Vec4 at{};
     if (!Position(PlayerHandle(), at)) return nullptr;
-    if (OnMovingPiece(at))
-        return "she's standing on something the level moves (a lift, the slab beside one), which a load can't set "
-               "her back on";
+    constexpr const char* kOnPiece =
+        "she's standing on something the level moves (a lift, the slab beside one), which a load can't set her back on";
+    // her controller knows what she's on. The ray only knows layer 16, which
+    // Gran Pulse and Nautilus put under plain ground all over, and Save went
+    // missing there in patches for no reason (Nov 27)
+    const auto* ctrl = *reinterpret_cast<const unsigned char**>(g_base + kFieldPlayerRva);
+    if (ctrl && *reinterpret_cast<const float*>(ctrl + kControllerGround) != 1.0f) return kOnPiece;
+    if ((!ctrl || g_cutscenePosed) && OnMovingPiece(at))
+        return "she's over something a cutscene moved here (the ray reads it under her), which a load can't set her "
+               "back on";
     return nullptr;
 }
 
@@ -3366,7 +3383,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.43, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.44, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3412,7 +3429,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.43";
+    d.version = "0.25.44";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
