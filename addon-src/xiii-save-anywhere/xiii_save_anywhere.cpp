@@ -1240,6 +1240,11 @@ std::vector<Entry> Missing(const std::vector<Entry>& want, const std::vector<Ent
         // area needs, and one the save had dropped costs nothing loaded
         if (w.op == Op::Cutscene && !w.i) continue;
         auto it = std::find_if(have.begin(), have.end(), [&](const Entry& h) { return SameTarget(h, w); });
+        // and one the rebuild already has in stays as it is, whatever arg it
+        // went in with. Loading it again over itself took the game down with a
+        // pure virtual call (Nautilus, Nov 27: five of them, the load a box
+        // gave against the one the rebuild gave)
+        if (w.op == Op::Cutscene && it != have.end() && it->i) continue;
         if (FromBox(w) && it != have.end() && FromBox(*it) && it->seq > walked) continue;
         if (it == have.end() || !SameEffect(*it, w)) out.push_back(w);
     }
@@ -3361,7 +3366,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.42, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.43, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3407,7 +3412,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.42";
+    d.version = "0.25.43";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();
