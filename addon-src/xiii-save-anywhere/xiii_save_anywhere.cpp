@@ -2461,8 +2461,11 @@ void TickLoad(int state) {
         if (now - g_landSeenAt < 4000) return;
         Log("landed at %.2f %.2f %.2f, %.2f across and %.2f up from where it aimed", at.v[0], at.v[1], at.v[2], flat,
             at.v[1] - g_landTarget.v[1]);
-        // no fall, but not on it either: into the floor, where Save's off and the next load shouldn't go
-        if (drop > 0.3f) {
+        // no fall, but not on it either: into the floor, where Save's off and
+        // the next load shouldn't go. Off the spot a slope accounts for some of
+        // it: a few steps downhill on Palumpolum's rocks read 0.4 and 0.9 under
+        // and marked two good spots lost (Nov 27)
+        if (drop > 0.3f + std::max(0.0f, flat - 0.3f)) {
             Log("that's inside the floor at the spot, not on it");
             LoseSpot(g_loadedSlot, g_landTarget);
             Log("slot %d's next load starts on ground she walked, off that stretch", g_loadedSlot);
@@ -3430,7 +3433,7 @@ void RotateLog() {
 
 DWORD WINAPI Worker(LPVOID) {
     RotateLog();
-    Log("xiii_save_anywhere 0.25.46, pid %lu", GetCurrentProcessId());
+    Log("xiii_save_anywhere 0.25.47, pid %lu", GetCurrentProcessId());
     if (!Verify()) return 0;
     ReadSettings();
     Tidy();
@@ -3476,7 +3479,7 @@ const NovaFixPluginDescriptor kDescriptor = [] {
     d.id = "armyofone.xiii-save-anywhere";
     d.name = "Save Anywhere";
     d.author = "KarpTheMagikarp";
-    d.version = "0.25.46";
+    d.version = "0.25.47";
     d.description = "Save from the field pause screen, and load back where you stood.";
     return d;
 }();

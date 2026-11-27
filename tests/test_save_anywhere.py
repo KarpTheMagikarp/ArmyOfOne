@@ -1030,6 +1030,18 @@ def test_walking_off_the_spot_settles_the_landing_so_a_later_hop_isnt_a_fall():
     assert "if (g_landSeenAt && flat >= 3.0f && flat < 1e8f && std::fabs(drop) < 1.0f) {" in tick
     assert tick.index("if (g_landSeenAt && flat >= 3.0f") < tick.index("if (flat < 3.0f && drop > 1.5f")
 
+def test_a_few_steps_downhill_after_landing_isnt_read_as_inside_the_floor():
+    """
+    Palumpolum, Nov 27: two good loads on a steep rock walked 2.75 and 2.97 m
+    downhill inside the land check's window, read 0.43 and 0.93 under the spot
+    and got marked lost. On the spot it's still 0.3 m, and every metre off it
+    allows a metre of slope
+    """
+    source = SOURCE.read_text(encoding="utf-8")
+    tick = source[source.index("void TickLoad(int state) {"):]
+    tick = tick[:tick.index("\n}\n")]
+    assert "if (drop > 0.3f + std::max(0.0f, flat - 0.3f)) {" in tick
+
 def test_debug_watches_who_moves_her_through_the_seconds_after_a_load():
     """
     every load ends 1.6 to 1.8 m forward of where it set her down, a station's
@@ -1168,8 +1180,10 @@ def test_a_landing_under_the_spot_is_marked_like_a_drop():
     assert "UnderFloor" not in source
     land = source[source.index("void TickLoad(int state) {"):]
     land = land[:land.index("\n}\n")]
-    assert "if (drop > 0.3f) {" in land
-    after = land[land.index("if (drop > 0.3f) {"):]
+    # 30 cm on the spot, plus whatever slope the steps off it walked
+    marker = "if (drop > 0.3f + std::max(0.0f, flat - 0.3f)) {"
+    assert marker in land
+    after = land[land.index(marker):]
     assert after.index("LoseSpot(g_loadedSlot, g_landTarget);") < after.index("g_lostLanding = true;")
     survey = source[source.index("void SurveyLayers(const Vec4& at) {"):]
     survey = survey[:survey.index("\n}\n")]
